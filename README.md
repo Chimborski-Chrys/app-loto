@@ -18,6 +18,10 @@ pip install streamlit pandas openpyxl
 ## Como executar
 
 ```bash
+python -m venv venv
+venv\Scripts\activate
+pip install streamlit pandas openpyxl
+
 streamlit run app_loto.py
 ```
 
