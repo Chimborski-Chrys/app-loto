@@ -42,6 +42,57 @@ def validar_jogo(jogo, historico_sets):
             
     return True
 
+def treinar_e_filtrar(estrategia_nome, ultimo_res, freq, hist_sets, params):
+    """
+    Versão Avançada: Valida o jogo atual e verifica a 'janela deslizante' 
+    para confirmar se a estratégia está em uma onda de acertos.
+    """
+    if len(hist_sets) < 50:
+        jogo = gerar_estrategia(estrategia_nome, ultimo_res, freq, hist_sets, params)
+        return {"jogo": jogo, "tentativas": 1, "sucessos": "Dados insuficientes"}
+
+    ultimos_25 = list(hist_sets)[-25:]
+    tentativas_globais = 0
+    
+    while tentativas_globais < 2000:
+        tentativas_globais += 1
+        # 1. Gera o candidato para o próximo concurso
+        candidato = gerar_estrategia(estrategia_nome, ultimo_res, freq, hist_sets, params)
+        candidato_set = set(candidato)
+        
+        # 2. Teste de 'Calor' (O que você faz na mão: 11 e 12 nos últimos 25)
+        onze, doze, treze = 0, 0, 0
+        for hist in ultimos_25:
+            acertos = len(candidato_set & hist)
+            if acertos == 11: onze += 1
+            elif acertos == 12: doze += 1
+            elif acertos >= 13: treze += 1
+        
+        # 3. Teste de 'Janela Deslizante' (A lógica de voltar no tempo)
+        # Vamos ver se a ESTRATÉGIA acertaria algo nos últimos 3 concursos reais
+        sucessos_janela = 0
+        for i in range(1, 4):
+            ponto_corte = -i
+            vizinhança = hist_sets[ponto_corte-25 : ponto_corte]
+            alvo_passado = hist_sets[ponto_corte]
+            
+            # Simula um jogo rápido daquela época
+            simulado = gerar_estrategia(estrategia_nome, list(vizinhança[-1]), {}, vizinhança, params)
+            if len(set(simulado) & alvo_passado) >= 11:
+                sucessos_janela += 1
+
+        # CRITÉRIO DE APROVAÇÃO:
+        # O jogo atual tem que ser bom (11 e 12) E a estratégia tem que ter acertado 
+        # pelo menos 1 vez nos últimos 3 concursos (está em uma onda)
+        if doze >= 1 and onze >= 1 and sucessos_janela >= 1:
+            return {
+                "jogo": candidato, 
+                "tentativas": tentativas_globais, 
+                "sucessos": f"Atual: 11({onze}x), 12({doze}x) | Onda: {sucessos_janela}/3"
+            }
+            
+    return {"jogo": candidato, "tentativas": tentativas_globais, "sucessos": "Meta parcial"}
+
 def gerar_estrategia(tipo, ultimo, frequencia, historico_sets, fixas=[]):
     tentativas = 0
     while tentativas < 1000:
@@ -65,15 +116,23 @@ def gerar_estrategia(tipo, ultimo, frequencia, historico_sets, fixas=[]):
             dezenas.update(random.sample(restante, 15 - len(fixas)))
 
         elif tipo == "Equilíbrio IA 2026":
-            # 8 ímpares e 7 pares (ou vice-versa)
+            # Padrão Carlos Cruz: Dezenas que sumiram nos últimos 3 concursos
+            if len(historico_sets) >= 3:
+                ultimos_3 = list(historico_sets)[-3:]
+                frias = todas - (ultimos_3[0] | ultimos_3[1] | ultimos_3[2])
+                # Garante pelo menos 3 dezenas "quentes" para voltar
+                dezenas.update(random.sample(list(frias), min(len(frias), 3)))
+            
+            # Padrão Matemático: 7 ou 8 Pares
             impares = [n for n in todas if n % 2 != 0]
             pares = [n for n in todas if n % 2 == 0]
-            if random.choice([True, False]):
-                dezenas.update(random.sample(impares, 8))
-                dezenas.update(random.sample(pares, 7))
-            else:
-                dezenas.update(random.sample(impares, 7))
-                dezenas.update(random.sample(pares, 8))
+            
+            n_imp = random.choice([7, 8])
+            restante_imp = [n for n in impares if n not in dezenas]
+            restante_par = [n for n in pares if n not in dezenas]
+            
+            dezenas.update(random.sample(restante_imp, n_imp - len([n for n in dezenas if n % 2 != 0])))
+            dezenas.update(random.sample(restante_par, 15 - len(dezenas)))
 
         elif tipo == "Ranking Frequência":
             rankeadas = sorted(frequencia.items(), key=lambda x: x[1], reverse=True)
@@ -119,24 +178,81 @@ def auto_pool_from_historico(historico_sets):
     return sorted(pool)
 
 
-def pontuar_jogo(jogo, hist_score):
+def pontuar_jogo(jogo, historico_sets):
     """
-    Pontua um jogo com dois critérios combinados:
-      1. Frequência: soma de quantas vezes cada dezena apareceu no hist_score.
-      2. Acertos médios: média de acertos do jogo contra cada concurso do hist_score.
-    Quanto maior a pontuação, maior a aderência ao histórico selecionado.
+    Versão Evoluída (IA 2026): Pontua baseado em Moldura, 
+    Repetição do Anterior e Frequência Geral.
     """
-    if not hist_score:
+    if not historico_sets:
         return 0.0
+    
     jogo_set = set(jogo)
-    freq = {}
-    for h in hist_score:
-        for n in h:
-            freq[n] = freq.get(n, 0) + 1
-    score_freq   = sum(freq.get(n, 0) for n in jogo)
-    acertos_med  = sum(len(jogo_set & h) for h in hist_score) / len(hist_score)
-    return round(score_freq + acertos_med * 50, 2)
+    ultimo_concurso = list(historico_sets)[-1]
+    
+    # 1. Filtro de Moldura (Bordas do volante)
+    moldura = {1,2,3,4,5,6,10,11,15,16,20,21,22,23,24,25}
+    pontos_moldura = len(jogo_set & moldura)
+    # Score alto se estiver no padrão clássico de 9 a 11 na moldura
+    score_moldura = 50 if 9 <= pontos_moldura <= 11 else 0
+    
+    # 2. Repetição do Anterior (Padrão de 8 a 10 repetidas)
+    repetidas = len(jogo_set & ultimo_concurso)
+    score_repeticao = 50 if 8 <= repetidas <= 10 else 0
+    
+    # 3. Frequência Acumulada (Aderência ao histórico)
+    acertos_med = sum(len(jogo_set & h) for h in historico_sets) / len(historico_sets)
+    
+    return round(score_moldura + score_repeticao + (acertos_med * 10), 2)
 
+# --- NOVAS LÓGICAS DE FECHAMENTO ---
+
+def gerar_fechamento_17_dezenas(escolhidas_17, fixas_5):
+    """Implementa o fechamento de 17 dezenas em 6 jogos (Radar Loto)."""
+    # Garante que as 5 fixas estão nos jogos
+    restantes = [n for n in escolhidas_17 if n not in fixas_5]
+    random.shuffle(restantes)
+    
+    jogos = []
+    # Distribuição circular para garantir que cada dezena apareça proporcionalmente
+    for i in range(6):
+        # Seleciona 10 dezenas das 12 restantes de forma rotativa
+        indices = [(i + j) % 12 for j in range(10)]
+        combinacao = [restantes[idx] for idx in indices]
+        jogos.append(sorted(fixas_5 + combinacao))
+    return jogos
+
+def gerar_fechamento_13_fixas(fixas_13, todas_25):
+    """Garante 15 pontos se acertar as 13 fixas (Prof. Xavier)."""
+    restantes = [n for n in todas_25 if n not in fixas_13]
+    random.shuffle(restantes)
+    
+    jogos = []
+    # Agrupa as 12 dezenas restantes em 6 pares
+    for i in range(0, 12, 2):
+        par = restantes[i:i+2]
+        jogos.append(sorted(fixas_13 + par))
+    return jogos
+
+def analisar_ciclo_3_concursos(historico_sets):
+    """Técnica Carlos Cruz: Rastreia dezenas frias (3 concursos sem sair)."""
+    if len(historico_sets) < 3:
+        return sorted(random.sample(range(1, 26), 15))
+    
+    ultimos_3 = historico_sets[-3:]
+    todas = set(range(1, 26))
+    
+    # Dezenas que não saíram em NENHUM dos últimos 3 (Grupo A - Frias)
+    frias = todas - (ultimos_3[0] | ultimos_3[1] | ultimos_3[2])
+    
+    # Dezenas que saíram em TODOS os últimos 3 (Grupo B - Quentes)
+    quentes = ultimos_3[0] & ultimos_3[1] & ultimos_3[2]
+    
+    # Monta a base do jogo
+    base = list(frias) + list(quentes)
+    restante = list(todas - set(base))
+    
+    jogo = base + random.sample(restante, 15 - len(base))
+    return sorted(jogo)
 
 # --- INTERFACE ---
 
@@ -172,8 +288,11 @@ if file:
 
 st.sidebar.divider()
 st.sidebar.header("2. Configurar Estratégia")
-estrategia_ref = st.sidebar.selectbox("Escolha a Lógica",
-    ["Inversão Suprema", "Cercamento 7/8", "Fixas de Ouro", "Equilíbrio IA 2026", "Ranking Frequência", "Fechamento de Dezenas"])
+estrategia_ref = st.sidebar.selectbox("Escolha a Lógica", [
+    "Inversão Suprema", "Cercamento 7/8", "Fixas de Ouro", 
+    "Equilíbrio IA 2026", "Ranking Frequência", "Fechamento de Dezenas",
+    "Fechamento 17 Dezenas (6 Jogos)", "Matriz 13 Fixas (Ouro)", "Rastreio Ciclo 3"
+])
 
 qtd_jogos = st.sidebar.slider("Quantidade de Jogos", 1, 50, 5)
 
@@ -235,15 +354,34 @@ if btn_otimizado:
     st.header(f"Resultados: {estrategia_ref}")
     meus_jogos = []
 
+    # Lógica específica para as novas estratégias de Matriz
+    if estrategia_ref == "Fechamento 17 Dezenas (6 Jogos)":
+        # Aqui você pode pedir 17 dezenas via multiselect na sidebar similar ao pool
+        pool_17 = st.sidebar.multiselect("Escolha 17 dezenas:", range(1,26), default=list(range(1,18)))
+        fixas_5 = pool_17[:5] # Ou peça para o usuário escolher
+        meus_jogos = gerar_fechamento_17_dezenas(pool_17, fixas_5)
+        
+    elif estrategia_ref == "Matriz 13 Fixas (Ouro)":
+        fixas_13 = st.sidebar.multiselect("Escolha 13 Fixas:", range(1,26), default=list(range(1,14)))
+        meus_jogos = gerar_fechamento_13_fixas(fixas_13, list(range(1,26)))
+        
+    elif estrategia_ref == "Rastreio Ciclo 3":
+        for _ in range(qtd_jogos):
+            meus_jogos.append(analisar_ciclo_3_concursos(historico_sets))
+
     cols = st.columns(3)
     for i in range(qtd_jogos):
-        jogo = gerar_estrategia(estrategia_ref, ultimo_resultado, frequencia, historico_sets, fixas=fixas)
+        # Chama o treino e recebe o dicionário completo
+        resultado = treinar_e_filtrar(estrategia_ref, ultimo_resultado, frequencia, historico_sets, fixas=fixas)
+        jogo = resultado["jogo"] # Extrai a lista de números
         meus_jogos.append(jogo)
 
         with cols[i % 3]:
             st.markdown(f"**Jogo {i+1}**")
             st.markdown(render_volante(jogo), unsafe_allow_html=True)
-            st.write(f"Soma: {sum(jogo)} | Pares: {len([n for n in jogo if n % 2 == 0])}")
+            # Exibe as métricas de treino para cada jogo gerado
+            st.caption(f"🎯 {resultado['sucessos']}") 
+            st.write(f"Soma: {sum(jogo)} | Gen: {resultado['tentativas']}")
             st.divider()
 
     df_export = pd.DataFrame(meus_jogos)
@@ -268,31 +406,45 @@ elif btn_painel:
     painel_jogos = []
     cols = st.columns(3)
     for idx, (nome, params, info) in enumerate(estrategias_painel):
-        jogo = gerar_estrategia(nome, ultimo_resultado, frequencia, historico_sets, fixas=params)
+        with st.spinner(f"IA treinando {nome}..."):
+            # 1. Chamamos o treino (retorna um dicionário)
+            resultado = treinar_e_filtrar(
+                nome, 
+                ultimo_resultado, 
+                frequencia, 
+                historico_sets, 
+                params
+            )
+            
+            # 2. EXTRAÍMOS o jogo e as métricas do dicionário
+            jogo = resultado["jogo"]
+            tentativas = resultado["tentativas"]
+            performance = resultado["sucessos"]
+            
         painel_jogos.append(jogo)
 
         with cols[idx % 3]:
             st.markdown(f"**{nome}**")
             if info:
                 st.caption(info)
+            
+            # 3. Agora o render_volante recebe a LISTA correta
             st.markdown(render_volante(jogo), unsafe_allow_html=True)
-            st.write(f"Soma: {sum(jogo)} | Pares: {len([n for n in jogo if n % 2 == 0])}")
+            
+            # 4. Mostramos os dados do treino para cada estratégia
+            st.caption(f"📊 {performance}")
+            st.write(f"Soma: {sum(jogo)} | Gen: {tentativas}")
             st.divider()
 
     df_export = pd.DataFrame(painel_jogos)
     csv = df_export.to_csv(index=False, header=False).encode('utf-8')
     st.download_button("Baixar Painel (CSV)", csv, "painel_completo.csv", "text/csv")
-
+    
 elif btn_rapido:
-    st.header("⚡ Jogo Rápido — Top 2 Jogos")
+    st.header("⚡ Jogo Rápido — Análise de Performance IA")
 
-    hist_score = (
-        historico_sets[-n_parcial:] if n_parcial and len(historico_sets) >= n_parcial
-        else historico_sets
-    )
-    escopo_label = f"últimos {len(hist_score)} concursos" if n_parcial else f"histórico completo ({len(hist_score)} concursos)"
-    st.caption(f"Pontuação calculada sobre: {escopo_label}")
-
+    hist_score = historico_sets[-n_parcial:] if n_parcial and len(historico_sets) >= n_parcial else historico_sets
+    
     fixas_auto = auto_fixas_from_historico(historico_sets)
     pool_auto  = auto_pool_from_historico(historico_sets)
 
@@ -306,29 +458,43 @@ elif btn_rapido:
     ]
 
     candidatos = []
-    for nome, params in estrategias_todas:
-        jogo  = gerar_estrategia(nome, ultimo_resultado, frequencia, historico_sets, fixas=params)
-        score = pontuar_jogo(jogo, hist_score)
-        candidatos.append((nome, jogo, score))
+    with st.spinner("IA treinando e validando gerações..."):
+        for nome, params in estrategias_todas:
+            resultado = treinar_e_filtrar(nome, ultimo_resultado, frequencia, historico_sets, params)
+            score = pontuar_jogo(resultado["jogo"], hist_score)
+            candidatos.append({
+                "nome": nome, 
+                "jogo": resultado["jogo"], 
+                "score": score, 
+                "tentativas": resultado["tentativas"],
+                "sucessos": resultado["sucessos"]
+            })
 
-    candidatos.sort(key=lambda x: x[2], reverse=True)
+    # Ordenar por Score
+    candidatos.sort(key=lambda x: x["score"], reverse=True)
     top2 = candidatos[:2]
 
+    # Exibição dos Top 2
     cols = st.columns(2)
-    rapido_jogos = []
-    for idx, (nome, jogo, score) in enumerate(top2):
-        rapido_jogos.append(jogo)
+    for idx, c in enumerate(top2):
         with cols[idx]:
-            st.markdown(f"**#{idx+1} — {nome}**")
-            st.caption(f"Pontuação: {score:.1f}")
-            st.markdown(render_volante(jogo), unsafe_allow_html=True)
-            st.write(f"Soma: {sum(jogo)} | Pares: {len([n for n in jogo if n % 2 == 0])}")
+            st.subheader(f"#{idx+1} — {c['nome']}")
+            st.markdown(render_volante(c['jogo']), unsafe_allow_html=True)
+            # MÉTRICAS DE TREINO AQUI:
+            st.info(f"**Treino:** {c['tentativas']} gerações analisadas")
+            st.success(f"**Performance:** Fez +11 pontos em {c['sucessos']} dos últimos 25 concursos.")
+            st.write(f"Soma: {sum(c['jogo'])} | Score: {c['score']:.1f}")
 
-    with st.expander("Ver ranking completo das 6 estratégias"):
-        for i, (nome, jogo, score) in enumerate(candidatos):
-            st.write(f"**{i+1}. {nome}** — Pontuação: {score:.1f} | {jogo}")
+    # Ranking Completo Expandido
+    with st.expander("Ver Ranking de Treino Completo"):
+        for i, c in enumerate(candidatos):
+            col_a, col_b, col_c = st.columns([1, 2, 2])
+            col_a.write(f"**{i+1}º**")
+            col_b.write(f"**{c['nome']}**")
+            col_c.write(f"Gen: {c['tentativas']} | Exitos: {c['sucessos']} | Score: {c['score']:.1f}")
 
-    df_export = pd.DataFrame(rapido_jogos)
+    # Botão de Download
+    df_export = pd.DataFrame([c['jogo'] for c in top2])
     csv = df_export.to_csv(index=False, header=False).encode('utf-8')
     st.download_button("Baixar Top 2 (CSV)", csv, "jogo_rapido.csv", "text/csv")
 
