@@ -150,37 +150,43 @@ def validar_jogo_mega(jogo, historico_sets, quentes):
 
 # ── GERAÇÃO ────────────────────────────────────────────────────────────────────
 
-def _completar_jogo(dezenas, n_numeros):
+def _completar_jogo(dezenas, n_numeros, pool=None):
     """Preenche o jogo até n_numeros com dezenas aleatórias do pool restante."""
-    restante = list(TODAS - dezenas)
+    p = pool if pool is not None else TODAS
+    restante = list(p - dezenas)
     faltam = n_numeros - len(dezenas)
     if faltam > 0 and len(restante) >= faltam:
         dezenas.update(random.sample(restante, faltam))
     return dezenas
 
 
-def _fallback(n_numeros, historico_sets, quentes):
+def _fallback(n_numeros, historico_sets, quentes, pool=None):
     """Geração aleatória pura com filtros mínimos (soma + ineditismo)."""
+    p = list(pool if pool is not None else TODAS)
+    if len(p) < n_numeros:
+        return sorted(random.sample(p, len(p)))
     for _ in range(5000):
-        jogo = sorted(random.sample(range(1, 61), n_numeros))
+        jogo = sorted(random.sample(p, n_numeros))
         if validar_soma(jogo) and validar_ineditismo(jogo, historico_sets):
             return jogo
-    return sorted(random.sample(range(1, 61), n_numeros))
+    return sorted(random.sample(p, n_numeros))
 
 
-def gerar_frequencia_tendencia(n_numeros, historico_sets, quentes, frequencia):
+def gerar_frequencia_tendencia(n_numeros, historico_sets, quentes, frequencia, pool=None):
     """
     Mistura números quentes históricos (~35%), tendência recente (~30%)
     e 1 número frio estratégico, completando com aleatório.
     """
-    atrasados = numeros_atrasados(historico_sets, 15) if historico_sets else list(range(1, 16))
-    tendentes = tendencia_recente(historico_sets, 20) if historico_sets else list(range(1, 16))
+    p = pool if pool is not None else TODAS
+    atrasados = [n for n in numeros_atrasados(historico_sets, 15) if n in p] if historico_sets else sorted(p)[:15]
+    tendentes  = [n for n in tendencia_recente(historico_sets, 20)  if n in p] if historico_sets else sorted(p)[:15]
+    quentes_p  = [n for n in quentes if n in p]
 
     for _ in range(2000):
         dezenas = set()
 
         n_q = max(1, round(n_numeros * 0.35))
-        dezenas.update(random.sample(quentes, min(n_q, len(quentes))))
+        dezenas.update(random.sample(quentes_p, min(n_q, len(quentes_p))))
 
         n_t = max(1, round(n_numeros * 0.30))
         disp_tend = [x for x in tendentes if x not in dezenas]
@@ -190,85 +196,90 @@ def gerar_frequencia_tendencia(n_numeros, historico_sets, quentes, frequencia):
         if disp_frios:
             dezenas.add(random.choice(disp_frios))
 
-        dezenas = _completar_jogo(dezenas, n_numeros)
+        dezenas = _completar_jogo(dezenas, n_numeros, pool=p)
         jogo = sorted(dezenas)
-        if len(jogo) == n_numeros and validar_jogo_mega(jogo, historico_sets, quentes):
+        if len(jogo) == n_numeros and validar_jogo_mega(jogo, historico_sets, quentes_p):
             return jogo
 
-    return _fallback(n_numeros, historico_sets, quentes)
+    return _fallback(n_numeros, historico_sets, quentes_p, pool=p)
 
 
-def gerar_equilibrio_volante(n_numeros, historico_sets, quentes):
+def gerar_equilibrio_volante(n_numeros, historico_sets, quentes, pool=None):
     """
     Garante ao menos 1 dezena por quadrante e preenche priorizando
     equilíbrio de paridade e distribuição espacial.
     """
+    p = pool if pool is not None else TODAS
+    quads_disp = [list(q & p) for q in QUADRANTES if q & p]
+
     for _ in range(2000):
         dezenas = set()
-        for q in QUADRANTES:
-            dezenas.add(random.choice(list(q)))
-        dezenas = _completar_jogo(dezenas, n_numeros)
+        for q in quads_disp:
+            dezenas.add(random.choice(q))
+        dezenas = _completar_jogo(dezenas, n_numeros, pool=p)
         jogo = sorted(dezenas)
         if len(jogo) == n_numeros and validar_jogo_mega(jogo, historico_sets, quentes):
             return jogo
-    return _fallback(n_numeros, historico_sets, quentes)
+    return _fallback(n_numeros, historico_sets, quentes, pool=p)
 
 
-def gerar_numeros_atrasados(n_numeros, historico_sets, quentes):
+def gerar_numeros_atrasados(n_numeros, historico_sets, quentes, pool=None):
     """
     Prioriza dezenas que não saem há mais concursos (~50%) e
     adiciona pelo menos 1 número quente para passar no filtro.
     """
-    atrasados = numeros_atrasados(historico_sets, 20) if historico_sets else list(range(1, 21))
+    p = pool if pool is not None else TODAS
+    atrasados = [n for n in numeros_atrasados(historico_sets, 20) if n in p] if historico_sets else sorted(p)[:20]
+    quentes_p = [n for n in quentes if n in p]
 
     for _ in range(2000):
         dezenas = set()
         n_a = max(2, round(n_numeros * 0.50))
         dezenas.update(random.sample(atrasados, min(n_a, len(atrasados))))
 
-        disp_q = [x for x in quentes if x not in dezenas]
+        disp_q = [x for x in quentes_p if x not in dezenas]
         if disp_q:
             dezenas.add(random.choice(disp_q))
 
-        dezenas = _completar_jogo(dezenas, n_numeros)
+        dezenas = _completar_jogo(dezenas, n_numeros, pool=p)
         jogo = sorted(dezenas)
-        if len(jogo) == n_numeros and validar_jogo_mega(jogo, historico_sets, quentes):
+        if len(jogo) == n_numeros and validar_jogo_mega(jogo, historico_sets, quentes_p):
             return jogo
-    return _fallback(n_numeros, historico_sets, quentes)
+    return _fallback(n_numeros, historico_sets, quentes_p, pool=p)
 
 
-def gerar_fixas_ouro(n_numeros, historico_sets, quentes, fixas):
+def gerar_fixas_ouro(n_numeros, historico_sets, quentes, fixas, pool=None):
     """Mantém as dezenas fixas e preenche o restante com filtros aplicados."""
+    p = pool if pool is not None else TODAS
+    fixas_validas = [f for f in fixas if f in p]  # ignora fixas excluídas do pool
     for _ in range(2000):
-        dezenas = set(fixas)
-        dezenas = _completar_jogo(dezenas, n_numeros)
+        dezenas = set(fixas_validas)
+        dezenas = _completar_jogo(dezenas, n_numeros, pool=p)
         jogo = sorted(dezenas)
         if len(jogo) == n_numeros and validar_jogo_mega(jogo, historico_sets, quentes):
             return jogo
-    return _fallback(n_numeros, historico_sets, quentes)
+    return _fallback(n_numeros, historico_sets, quentes, pool=p)
 
 
-def gerar_tecnica_z(n_numeros, historico_sets, quentes):
+def gerar_tecnica_z(n_numeros, historico_sets, quentes, pool=None):
     """
     Técnica do Z: soma as dezenas do último resultado, usa o último dígito
     como offset e seleciona candidatos ao longo do padrão Z no volante
     (linha superior 01–10, diagonal 10→55, linha inferior 51–60).
     """
+    p = pool if pool is not None else TODAS
     if not historico_sets:
-        return _fallback(n_numeros, historico_sets, quentes)
+        return _fallback(n_numeros, historico_sets, quentes, pool=p)
 
     ultimo = sorted(historico_sets[-1])
     soma = sum(ultimo)
-    offset = soma % 10  # último dígito da soma
+    offset = soma % 10
 
-    # Z no volante 6×10: linha topo + diagonal anti + linha base
-    # volante[row][col] = row*10 + col + 1
-    linha_top = list(range(1, 11))                          # 01–10
-    diagonal  = [10 - i + i * 10 for i in range(6)]        # 10,19,28,37,46,55
-    linha_bot = list(range(51, 61))                         # 51–60
+    linha_top = list(range(1, 11))
+    diagonal  = [10 - i + i * 10 for i in range(6)]
+    linha_bot = list(range(51, 61))
     pool_z = set(linha_top + diagonal + linha_bot)
 
-    # Expande o pool com vizinhos ±offset
     pool_expandido = set()
     for n in pool_z:
         for delta in (-offset, 0, offset):
@@ -276,29 +287,30 @@ def gerar_tecnica_z(n_numeros, historico_sets, quentes):
             if 1 <= novo <= 60:
                 pool_expandido.add(novo)
 
-    candidatos = sorted(pool_expandido & TODAS)
+    candidatos = sorted(pool_expandido & p)  # respeita exclusões
 
     for _ in range(2000):
         dezenas = set()
         n_z = max(2, round(n_numeros * 0.6))
         dezenas.update(random.sample(candidatos, min(n_z, len(candidatos))))
-        dezenas = _completar_jogo(dezenas, n_numeros)
+        dezenas = _completar_jogo(dezenas, n_numeros, pool=p)
         jogo = sorted(dezenas)
         if len(jogo) == n_numeros and validar_jogo_mega(jogo, historico_sets, quentes):
             return jogo
 
-    return _fallback(n_numeros, historico_sets, quentes)
+    return _fallback(n_numeros, historico_sets, quentes, pool=p)
 
 
-def gerar_tecnica_mais_menos_3(n_numeros, historico_sets, quentes, num_proximo_concurso):
+def gerar_tecnica_mais_menos_3(n_numeros, historico_sets, quentes, num_proximo_concurso, pool=None):
     """
     Técnica +3/-3: concatena as dezenas do último resultado como string,
     divide pelo número do próximo concurso com alta precisão e extrai pares
     de dígitos 01–60 da dízima resultante.
     Variações: original, cada dezena +3, cada dezena -3.
     """
+    p = pool if pool is not None else TODAS
     if not historico_sets or num_proximo_concurso <= 0:
-        return _fallback(n_numeros, historico_sets, quentes)
+        return _fallback(n_numeros, historico_sets, quentes, pool=p)
 
     getcontext().prec = 60
     ultimo = sorted(historico_sets[-1])
@@ -321,7 +333,7 @@ def gerar_tecnica_mais_menos_3(n_numeros, historico_sets, quentes, num_proximo_c
     candidatos.update(_extrair(ultimo))
     candidatos.update(_extrair([min(60, n + 3) for n in ultimo]))
     candidatos.update(_extrair([max(1,  n - 3) for n in ultimo]))
-    candidatos &= TODAS
+    candidatos &= p  # respeita exclusões
 
     candidatos_lista = sorted(candidatos)
 
@@ -332,37 +344,68 @@ def gerar_tecnica_mais_menos_3(n_numeros, historico_sets, quentes, num_proximo_c
             dezenas.update(random.sample(candidatos_lista, min(n_c, len(candidatos_lista))))
         elif candidatos_lista:
             dezenas.update(candidatos_lista)
-        dezenas = _completar_jogo(dezenas, n_numeros)
+        dezenas = _completar_jogo(dezenas, n_numeros, pool=p)
         jogo = sorted(dezenas)
         if len(jogo) == n_numeros and validar_jogo_mega(jogo, historico_sets, quentes):
             return jogo
 
-    return _fallback(n_numeros, historico_sets, quentes)
+    return _fallback(n_numeros, historico_sets, quentes, pool=p)
 
 
-def gerar_estrategia_mega(tipo, n_numeros, frequencia, historico_sets, quentes, fixas=None, num_concurso=None):
+def gerar_estrategia_mega(tipo, n_numeros, frequencia, historico_sets, quentes,
+                          fixas=None, num_concurso=None, pool=None):
     if fixas is None:
         fixas = []
+    p = pool  # None → cada sub-função usa TODAS como default
     if tipo == "Frequência e Tendência":
-        return gerar_frequencia_tendencia(n_numeros, historico_sets, quentes, frequencia)
+        return gerar_frequencia_tendencia(n_numeros, historico_sets, quentes, frequencia, pool=p)
     elif tipo == "Equilíbrio do Volante":
-        return gerar_equilibrio_volante(n_numeros, historico_sets, quentes)
+        return gerar_equilibrio_volante(n_numeros, historico_sets, quentes, pool=p)
     elif tipo == "Números Atrasados":
-        return gerar_numeros_atrasados(n_numeros, historico_sets, quentes)
+        return gerar_numeros_atrasados(n_numeros, historico_sets, quentes, pool=p)
     elif tipo == "Fixas de Ouro":
-        return gerar_fixas_ouro(n_numeros, historico_sets, quentes, fixas)
+        return gerar_fixas_ouro(n_numeros, historico_sets, quentes, fixas, pool=p)
     elif tipo == "Técnica do Z":
-        return gerar_tecnica_z(n_numeros, historico_sets, quentes)
+        return gerar_tecnica_z(n_numeros, historico_sets, quentes, pool=p)
     elif tipo == "Técnica +3/-3":
-        return gerar_tecnica_mais_menos_3(n_numeros, historico_sets, quentes, num_concurso or 1)
-    return _fallback(n_numeros, historico_sets, quentes)
+        return gerar_tecnica_mais_menos_3(n_numeros, historico_sets, quentes, num_concurso or 1, pool=p)
+    return _fallback(n_numeros, historico_sets, quentes, pool=p)
 
 
-def gerar_desdobramento(pool, n_numeros, historico_sets, quentes, max_jogos):
+def gerar_melhor_jogo(n_numeros, frequencia, historico_sets, quentes,
+                      num_concurso=1, pool=None):
+    """
+    Executa todas as estratégias e devolve a de maior score.
+    Retorna (jogo, nome_estrategia, score, ranking_completo).
+    """
+    candidatos = [
+        ("Frequência e Tendência", {}),
+        ("Equilíbrio do Volante",  {}),
+        ("Números Atrasados",      {}),
+        ("Técnica do Z",           {}),
+        ("Técnica +3/-3",          {"num_concurso": num_concurso}),
+    ]
+
+    ranking = []
+    for nome, kwargs in candidatos:
+        jogo = gerar_estrategia_mega(
+            nome, n_numeros, frequencia, historico_sets, quentes,
+            pool=pool, **kwargs
+        )
+        score = pontuar_jogo_mega(jogo, historico_sets, quentes, frequencia)
+        ranking.append({"nome": nome, "jogo": jogo, "score": score})
+
+    ranking.sort(key=lambda x: x["score"], reverse=True)
+    vencedor = ranking[0]
+    return vencedor["jogo"], vencedor["nome"], vencedor["score"], ranking
+
+
+def gerar_desdobramento(pool, n_numeros, historico_sets, quentes, max_jogos, excluidos=None):
     """
     Gera até max_jogos combinações válidas a partir do pool.
     Para pools grandes (> 50k combinações) usa amostragem aleatória.
     """
+    pool = [n for n in pool if n not in (excluidos or [])]  # respeita exclusões
     total = comb(len(pool), n_numeros)
     jogos_validos = []
     seen = set()
@@ -518,6 +561,7 @@ st.sidebar.divider()
 st.sidebar.header("3. Escolher Estratégia")
 
 estrategia = st.sidebar.selectbox("Estratégia", [
+    "Melhor Jogo (IA)",
     "Frequência e Tendência",
     "Equilíbrio do Volante",
     "Números Atrasados",
@@ -531,7 +575,14 @@ fixas = []
 pool_desdobramento = []
 num_concurso_input = proximo_concurso
 
-if estrategia == "Técnica do Z":
+if estrategia == "Melhor Jogo (IA)":
+    st.sidebar.info(
+        "Roda todas as estratégias internamente, pontua cada jogo gerado "
+        "e entrega apenas o de maior score. O ranking completo fica visível "
+        "em cada card gerado."
+    )
+
+elif estrategia == "Técnica do Z":
     st.sidebar.info(
         "Usa a soma do último resultado para montar o padrão Z no volante "
         "(linha 01–10, diagonal, linha 51–60) e gera candidatos via deslocamento."
@@ -581,6 +632,24 @@ elif estrategia == "Desdobramento (Fechamento)":
     else:
         st.sidebar.error(f"Selecione pelo menos {min_pool} dezenas no pool.")
 
+st.sidebar.divider()
+st.sidebar.header("🚫 Excluir Números")
+excluidos = st.sidebar.multiselect(
+    "Remova dezenas do volante:",
+    options=list(range(1, 61)),
+    default=[],
+    format_func=lambda x: f"{x:02d}",
+    help="Nenhuma estratégia usará esses números."
+)
+pool_disponivel = TODAS - set(excluidos) if excluidos else None  # None = usa TODAS sem restrição
+
+if excluidos:
+    restantes = len(TODAS) - len(excluidos)
+    if restantes < n_numeros:
+        st.sidebar.error(f"Apenas {restantes} números disponíveis — insuficiente para {n_numeros} por jogo.")
+    else:
+        st.sidebar.caption(f"{restantes} números disponíveis após exclusão.")
+
 btn_gerar = st.sidebar.button("🎯 Gerar Jogos")
 
 st.sidebar.divider()
@@ -599,7 +668,36 @@ if btn_gerar:
 
     jogos_gerados = []
 
-    if estrategia == "Desdobramento (Fechamento)":
+    if estrategia == "Melhor Jogo (IA)":
+        resultados_ia = []
+        with st.spinner(f"IA avaliando todas as estratégias para {qtd_jogos} jogo(s)..."):
+            for i in range(qtd_jogos):
+                jogo, nome_venc, score_venc, ranking = gerar_melhor_jogo(
+                    n_numeros, frequencia, historico_sets, quentes_global,
+                    num_concurso=num_concurso_input, pool=pool_disponivel
+                )
+                resultados_ia.append((jogo, nome_venc, score_venc, ranking))
+                jogos_gerados.append(jogo)
+
+        n_cols = min(3, len(resultados_ia))
+        cols = st.columns(n_cols)
+        for i, (jogo, nome_venc, score_venc, ranking) in enumerate(resultados_ia):
+            with cols[i % n_cols]:
+                st.markdown(f"**Jogo {i + 1}**")
+                st.success(f"Estratégia eleita: **{nome_venc}**")
+                st.markdown(render_volante_mega(jogo), unsafe_allow_html=True)
+                st.caption(info_jogo(jogo, quentes_global))
+                st.write(f"Score IA: **{score_venc:.1f}**")
+                with st.expander("Ver ranking interno"):
+                    for pos, r in enumerate(ranking):
+                        st.write(f"{pos + 1}º {r['nome']} — Score: {r['score']:.1f}")
+                st.divider()
+
+        df_export = pd.DataFrame(jogos_gerados)
+        csv = df_export.to_csv(index=False, header=False).encode("utf-8")
+        st.download_button("⬇️ Baixar Jogos (CSV)", csv, "jogos_megasena.csv", "text/csv")
+
+    elif estrategia == "Desdobramento (Fechamento)":
         if len(pool_desdobramento) < n_numeros + 1:
             st.error(f"Pool insuficiente. Selecione pelo menos {n_numeros + 1} dezenas.")
         else:
@@ -607,7 +705,8 @@ if btn_gerar:
                 jogos_gerados = gerar_desdobramento(
                     pool_desdobramento, n_numeros,
                     historico_sets, quentes_global,
-                    max_jogos=qtd_jogos
+                    max_jogos=qtd_jogos,
+                    excluidos=excluidos
                 )
             if not jogos_gerados:
                 st.warning("Nenhuma combinação passou nos filtros. Tente ampliar o pool.")
@@ -617,11 +716,12 @@ if btn_gerar:
                 jogo = gerar_estrategia_mega(
                     estrategia, n_numeros, frequencia,
                     historico_sets, quentes_global, fixas,
-                    num_concurso=num_concurso_input
+                    num_concurso=num_concurso_input,
+                    pool=pool_disponivel
                 )
                 jogos_gerados.append(jogo)
 
-    if jogos_gerados:
+    if jogos_gerados and estrategia != "Melhor Jogo (IA)":
         n_cols = min(3, len(jogos_gerados))
         cols = st.columns(n_cols)
         for i, jogo in enumerate(jogos_gerados):
@@ -684,13 +784,15 @@ elif btn_painel:
         if nome == "Desdobramento (Fechamento)":
             with st.spinner(f"Gerando: {nome}..."):
                 jogos_desdobr = gerar_desdobramento(
-                    pool_auto, n_numeros, historico_sets, quentes_global, max_jogos=1
+                    pool_auto, n_numeros, historico_sets, quentes_global,
+                    max_jogos=1, excluidos=excluidos
                 )
-                jogo = jogos_desdobr[0] if jogos_desdobr else _fallback(n_numeros, historico_sets, quentes_global)
+                jogo = jogos_desdobr[0] if jogos_desdobr else _fallback(n_numeros, historico_sets, quentes_global, pool=pool_disponivel)
         else:
             with st.spinner(f"Gerando: {nome}..."):
                 jogo = gerar_estrategia_mega(
-                    nome, n_numeros, frequencia, historico_sets, quentes_global, **kwargs
+                    nome, n_numeros, frequencia, historico_sets, quentes_global,
+                    pool=pool_disponivel, **kwargs
                 )
         score = pontuar_jogo_mega(jogo, historico_sets, quentes_global, frequencia)
         painel_jogos.append(jogo)
