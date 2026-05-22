@@ -1,0 +1,30 @@
+import streamlit as st
+
+st.set_page_config(
+    page_title="Loterias Pro — IA & Engenharia de Dados",
+    page_icon="🎰",
+    layout="wide"
+)
+
+st.title("🎰 Loterias Pro — IA & Engenharia de Dados")
+st.markdown("Bem-vindo ao gerador inteligente de jogos para loterias da Caixa Econômica Federal.")
+st.markdown("Escolha um módulo no menu lateral **←** ou clique em um dos atalhos abaixo.")
+
+st.divider()
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("🎲 Lotofácil")
+    st.write("25 números · escolha 15 · análise histórica e estratégias de fechamento.")
+    if st.button("Acessar Lotofácil", use_container_width=True):
+        st.switch_page("pages/1_Lotofacil.py")
+
+with col2:
+    st.subheader("🎰 Mega Sena")
+    st.write("60 números · aposte de 6 a 15 dezenas · 7 estratégias + Melhor Jogo IA.")
+    if st.button("Acessar Mega Sena", use_container_width=True):
+        st.switch_page("pages/2_Mega_Sena.py")
+
+st.divider()
+st.caption("Aviso: Este software é uma ferramenta de análise estatística. Loterias são jogos de azar e não há garantia de lucro.")
