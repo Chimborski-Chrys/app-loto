@@ -103,8 +103,15 @@ def gerar_estrategia(tipo, ultimo, frequencia, historico_sets, fixas=[]):
         ausentes = todas - presentes
         
         if tipo == "Inversão Suprema":
-            dezenas.update(ausentes) # As 10 ausentes
-            dezenas.update(random.sample(list(presentes), 5))
+            # 6 aus + 9 pres: teto de hits = 6+9 = 15 (flexível).
+            # Original 10+5 limitava o teto a 10 hits para muitos resultados.
+            dezenas.update(random.sample(list(ausentes), min(6, len(ausentes))))
+            disp_p = [x for x in presentes if x not in dezenas]
+            dezenas.update(random.sample(disp_p, min(9, len(disp_p))))
+            rest = list(todas - dezenas)
+            faltam = 15 - len(dezenas)
+            if faltam > 0 and len(rest) >= faltam:
+                dezenas.update(random.sample(rest, faltam))
             
         elif tipo == "Cercamento 7/8":
             dezenas.update(random.sample(list(ausentes), 7))
@@ -135,11 +142,34 @@ def gerar_estrategia(tipo, ultimo, frequencia, historico_sets, fixas=[]):
             dezenas.update(random.sample(restante_par, 15 - len(dezenas)))
 
         elif tipo == "Ranking Frequência":
-            rankeadas = sorted(frequencia.items(), key=lambda x: x[1], reverse=True)
-            top_10 = [d[0] for d in rankeadas[:10]]
-            dezenas.update(top_10)
-            restante = list(todas - set(top_10))
-            dezenas.update(random.sample(restante, 5))
+            # Sample ponderado por frequência de todos os 25 números.
+            # Top-10 fixo forçava até 5 não-alvos permanentes (teto 10 hits).
+            pool_rk = list(range(1, 26))
+            pesos_rk = [max(frequencia.get(n, 1), 1) for n in pool_rk]
+            pool_d = pool_rk[:]
+            pesos_d = pesos_rk[:]
+            while len(dezenas) < 15 and pool_d:
+                total = sum(pesos_d)
+                r = random.uniform(0, total)
+                acc = 0
+                for _i, _p in enumerate(pesos_d):
+                    acc += _p
+                    if acc >= r:
+                        dezenas.add(pool_d[_i])
+                        pool_d.pop(_i)
+                        pesos_d.pop(_i)
+                        break
+
+        elif tipo == "Rastreio Ciclo 3":
+            if len(historico_sets) >= 3:
+                ult3 = list(historico_sets)[-3:]
+                frias_c3 = sorted(todas - (ult3[0] | ult3[1] | ult3[2]))
+                if frias_c3:
+                    dezenas.update(random.sample(frias_c3, min(len(frias_c3), 3)))
+            rest_c3 = list(todas - dezenas)
+            faltam_c3 = 15 - len(dezenas)
+            if faltam_c3 > 0 and len(rest_c3) >= faltam_c3:
+                dezenas.update(random.sample(rest_c3, faltam_c3))
 
         elif tipo == "Fechamento de Dezenas":
             # Gera jogos exclusivamente dentro do pool definido pelo usuário.
@@ -234,25 +264,33 @@ def gerar_fechamento_13_fixas(fixas_13, todas_25):
     return jogos
 
 def analisar_ciclo_3_concursos(historico_sets):
-    """Técnica Carlos Cruz: Rastreia dezenas frias (3 concursos sem sair)."""
+    """
+    Rastreia dezenas frias (ausentes nos últimos 3) como âncora opcional.
+    Quentes forçados removidos — forçar todos os quentes bloqueava até 4 slots
+    com não-alvos, tornando 12+ acertos estruturalmente impossível.
+    """
     if len(historico_sets) < 3:
         return sorted(random.sample(range(1, 26), 15))
-    
+
     ultimos_3 = historico_sets[-3:]
     todas = set(range(1, 26))
-    
-    # Dezenas que não saíram em NENHUM dos últimos 3 (Grupo A - Frias)
-    frias = todas - (ultimos_3[0] | ultimos_3[1] | ultimos_3[2])
-    
-    # Dezenas que saíram em TODOS os últimos 3 (Grupo B - Quentes)
-    quentes = ultimos_3[0] & ultimos_3[1] & ultimos_3[2]
-    
-    # Monta a base do jogo
-    base = list(frias) + list(quentes)
-    restante = list(todas - set(base))
-    
-    jogo = base + random.sample(restante, 15 - len(base))
-    return sorted(jogo)
+    frias = sorted(todas - (ultimos_3[0] | ultimos_3[1] | ultimos_3[2]))
+
+    todas_list = list(range(1, 26))
+    for _ in range(500):
+        base = set()
+        if frias:
+            base.update(random.sample(frias, min(len(frias), 3)))
+        restante = [n for n in todas_list if n not in base]
+        faltam = 15 - len(base)
+        if faltam > 0 and len(restante) >= faltam:
+            base.update(random.sample(restante, faltam))
+        jogo = sorted(base)
+        if len(jogo) == 15:
+            soma = sum(jogo)
+            if 180 <= soma <= 220:
+                return jogo
+    return sorted(random.sample(range(1, 26), 15))
 
 # --- INTERFACE ---
 
@@ -372,7 +410,7 @@ if btn_otimizado:
     cols = st.columns(3)
     for i in range(qtd_jogos):
         # Chama o treino e recebe o dicionário completo
-        resultado = treinar_e_filtrar(estrategia_ref, ultimo_resultado, frequencia, historico_sets, fixas=fixas)
+        resultado = treinar_e_filtrar(estrategia_ref, ultimo_resultado, frequencia, historico_sets, fixas)
         jogo = resultado["jogo"] # Extrai a lista de números
         meus_jogos.append(jogo)
 
