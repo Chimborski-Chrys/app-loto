@@ -4,6 +4,7 @@ import random
 import time
 from collections import Counter
 from math import comb
+from itertools import combinations
 
 st.set_page_config(
     page_title="Lotofácil Pro — IA & Engenharia de Dados",
@@ -26,6 +27,11 @@ st.markdown("""
 # ── CONSTANTES ─────────────────────────────────────────────────────────────────
 TODAS = set(range(1, 26))
 COLUNAS_BOLAS = [f"Bola{i}" for i in range(1, 16)]
+MOLDURA = {1, 2, 3, 4, 5, 6, 10, 11, 15, 16, 20, 21, 22, 23, 24, 25}
+LINHAS_GRID  = [set(range(1 + 5 * i, 6 + 5 * i)) for i in range(5)]
+COLUNAS_GRID = [set(range(1 + i, 26, 5)) for i in range(5)]
+DIAG_PRINCIPAL  = {1, 7, 13, 19, 25}
+DIAG_SECUNDARIA = {5, 9, 13, 17, 21}
 
 # ── VALIDAÇÃO ──────────────────────────────────────────────────────────────────
 def validar_soma(jogo):
@@ -259,29 +265,95 @@ def gerar_ciclo3(historico_sets, pool=None):
             return j
     return _fallback(historico_sets, pool=p)
 
-def gerar_fechamento_17_dezenas(escolhidas_17, fixas_5):
-    """Fechamento de 17 dezenas em 6 jogos (Radar Loto)."""
-    restantes = [n for n in escolhidas_17 if n not in fixas_5]
-    random.shuffle(restantes)
-    jogos = []
-    for i in range(6):
-        indices = [(i + j) % 12 for j in range(10)]
-        combinacao = [restantes[idx] for idx in indices if idx < len(restantes)]
-        jogos.append(sorted(fixas_5 + combinacao[:10]))
-    return jogos
+# (fechamentos heurísticos antigos substituídos por gerar_fechamento_garantido)
 
-def gerar_fechamento_13_fixas(fixas_13, todas_25):
-    """Garante 15 pontos se acertar as 13 fixas."""
-    restantes = [n for n in todas_25 if n not in fixas_13]
-    random.shuffle(restantes)
-    jogos = []
-    for i in range(0, min(12, len(restantes) - 1), 2):
-        par = restantes[i:i + 2]
-        if len(par) == 2:
-            jogos.append(sorted(fixas_13 + par))
-    return jogos
+# ── ANTI-POPULARIDADE ──────────────────────────────────────────────────────────
+def indice_popularidade(jogo, historico_sets=None):
+    """Penalidade por padrões que multidões costumam jogar (menor = melhor).
+    Não muda a chance de acertar — reduz a divisão do prêmio em caso de acerto."""
+    js = set(jogo)
+    pen = 0
+    motivos = []
 
-# ── DISPATCHER ─────────────────────────────────────────────────────────────────
+    # Sequências longas (1-2-3-4-5...)
+    s = sorted(jogo)
+    run = melhor_run = 1
+    for i in range(len(s) - 1):
+        run = run + 1 if s[i] + 1 == s[i + 1] else 1
+        melhor_run = max(melhor_run, run)
+    if melhor_run >= 6:
+        pen += 30; motivos.append(f"{melhor_run} consecutivos")
+    elif melhor_run == 5:
+        pen += 15; motivos.append("5 consecutivos")
+
+    # Padrões geométricos no volante
+    for i, ln in enumerate(LINHAS_GRID):
+        if ln <= js:
+            pen += 25; motivos.append(f"linha {i + 1} completa")
+    for i, cl in enumerate(COLUNAS_GRID):
+        if cl <= js:
+            pen += 25; motivos.append(f"coluna {i + 1} completa")
+    if DIAG_PRINCIPAL <= js and DIAG_SECUNDARIA <= js:
+        pen += 20; motivos.append("X (diagonais) completo")
+
+    # Viés de datas/aniversários (concentração em 1–12)
+    baixos = sum(1 for n in jogo if n <= 12)
+    if baixos >= 10:
+        pen += 20; motivos.append(f"{baixos} dezenas ≤ 12 (viés de datas)")
+
+    # Moldura extrema (padrão visual muito jogado)
+    m = len(js & MOLDURA)
+    if m >= 14 or m <= 5:
+        pen += 15; motivos.append(f"moldura {m}/16")
+
+    # Repetição de resultado já sorteado (muita gente repete)
+    if historico_sets and any(len(js & h) >= 14 for h in historico_sets):
+        pen += 25; motivos.append("≈ resultado já sorteado")
+
+    return pen, motivos
+
+def gerar_anti_popular(historico_sets, pool=None, tentativas=400):
+    """Gera jogo válido minimizando o índice de popularidade."""
+    p = pool if pool is not None else TODAS
+    p_list = sorted(p)
+    if len(p_list) < 15:
+        return p_list
+    melhor_j, melhor_pen = None, float("inf")
+    for _ in range(tentativas):
+        j = sorted(random.sample(p_list, 15))
+        if not (validar_soma(j) and validar_sequencia(j)):
+            continue
+        if not validar_ineditismo(j, historico_sets):
+            continue
+        pen, _ = indice_popularidade(j)
+        if pen < melhor_pen:
+            melhor_pen, melhor_j = pen, j
+            if pen == 0:
+                break
+    return melhor_j if melhor_j else _fallback(historico_sets, pool=p)
+
+# ── FECHAMENTO GARANTIDO (COBERTURA) ───────────────────────────────────────────
+def gerar_fechamento_garantido(pool_dez, garantia=14, max_jogos=60):
+    """Set cover guloso: se as 15 sorteadas estiverem dentro do pool,
+    pelo menos um jogo terá >= `garantia` acertos. Garantia verificada."""
+    pool_dez = sorted(pool_dez)
+    alvos = [frozenset(c) for c in combinations(pool_dez, 15)]
+    nao_cobertos = set(range(len(alvos)))
+    jogos = []
+    while nao_cobertos and len(jogos) < max_jogos:
+        candidatos = alvos if len(alvos) <= 1500 else random.sample(alvos, 1500)
+        melhor, cobre_melhor = None, set()
+        for cand in candidatos:
+            cobre = {i for i in nao_cobertos if len(cand & alvos[i]) >= garantia}
+            if len(cobre) > len(cobre_melhor):
+                melhor, cobre_melhor = cand, cobre
+        if not cobre_melhor:
+            break
+        jogos.append(sorted(melhor))
+        nao_cobertos -= cobre_melhor
+    return jogos, len(nao_cobertos) == 0
+
+
 def gerar_estrategia_loto(tipo, frequencia, historico_sets, ultimo, fixas=None, pool=None):
     if fixas is None:
         fixas = []
@@ -300,23 +372,19 @@ def gerar_estrategia_loto(tipo, frequencia, historico_sets, ultimo, fixas=None, 
         return gerar_fechamento_dezenas(historico_sets, fixas, pool=p)
     elif tipo == "Rastreio Ciclo 3":
         return gerar_ciclo3(historico_sets, pool=p)
+    elif tipo == "Anti-Popular":
+        return gerar_anti_popular(historico_sets, pool=p)
     return _fallback(historico_sets, pool=p)
 
-# ── PONTUAÇÃO ──────────────────────────────────────────────────────────────────
+# ── PONTUAÇÃO (popularidade — menor é melhor) ──────────────────────────────────
 def pontuar_jogo_loto(jogo, historico_sets, frequencia):
-    if not historico_sets:
-        return 0.0
-    jogo_set = set(jogo)
-    ultimo = historico_sets[-1]
-    moldura = {1, 2, 3, 4, 5, 6, 10, 11, 15, 16, 20, 21, 22, 23, 24, 25}
-    score_moldura = 50 if 9 <= len(jogo_set & moldura) <= 11 else 0
-    score_rep     = 50 if 8 <= len(jogo_set & ultimo)   <= 10 else 0
-    acertos_med   = sum(len(jogo_set & h) for h in historico_sets) / len(historico_sets)
-    return round(score_moldura + score_rep + (acertos_med * 10), 2)
+    pen, _ = indice_popularidade(jogo, historico_sets)
+    return float(pen)
 
-# ── MELHOR JOGO (IA) ───────────────────────────────────────────────────────────
+# ── MELHOR JOGO (menor popularidade) ───────────────────────────────────────────
 def gerar_melhor_jogo_loto(frequencia, historico_sets, ultimo, pool=None):
     candidatos_est = [
+        "Anti-Popular",
         "Inversão Suprema",
         "Cercamento 7/8",
         "Equilíbrio IA 2026",
@@ -328,7 +396,7 @@ def gerar_melhor_jogo_loto(frequencia, historico_sets, ultimo, pool=None):
         jogo = gerar_estrategia_loto(tipo, frequencia, historico_sets, ultimo, pool=pool)
         score = pontuar_jogo_loto(jogo, historico_sets, frequencia)
         candidatos.append((jogo, tipo, score))
-    candidatos.sort(key=lambda x: x[2], reverse=True)
+    candidatos.sort(key=lambda x: x[2])  # menor popularidade primeiro
     ranking = [(nome, score) for (_, nome, score) in candidatos]
     jogo_best, nome_best, score_best = candidatos[0]
     return jogo_best, nome_best, score_best, ranking
@@ -399,8 +467,7 @@ def info_jogo(jogo):
     pares   = sum(1 for x in jogo if x % 2 == 0)
     impares = 15 - pares
     soma    = sum(jogo)
-    moldura = {1, 2, 3, 4, 5, 6, 10, 11, 15, 16, 20, 21, 22, 23, 24, 25}
-    n_mold  = len(set(jogo) & moldura)
+    n_mold  = len(set(jogo) & MOLDURA)
     return f"Soma: {soma} | Par/Ímpar: {pares}/{impares} | Moldura: {n_mold}/16"
 
 # ── INTERFACE ──────────────────────────────────────────────────────────────────
@@ -477,6 +544,7 @@ st.sidebar.divider()
 st.sidebar.header("3. Escolher Estratégia")
 
 estrategia = st.sidebar.selectbox("Estratégia", [
+    "Anti-Popular (Recomendado)",
     "Melhor Jogo (IA)",
     "Inversão Suprema",
     "Cercamento 7/8",
@@ -484,8 +552,7 @@ estrategia = st.sidebar.selectbox("Estratégia", [
     "Equilíbrio IA 2026",
     "Ranking Frequência",
     "Fechamento de Dezenas",
-    "Fechamento 17 Dezenas (6 Jogos)",
-    "Matriz 13 Fixas (Ouro)",
+    "Fechamento Garantido (Cobertura)",
     "Rastreio Ciclo 3",
 ])
 
@@ -513,19 +580,19 @@ elif estrategia == "Fechamento de Dezenas":
     else:
         st.sidebar.info(f"Pool {len(fixas)} dezenas → C({len(fixas)},15) combinações.")
 
-elif estrategia == "Fechamento 17 Dezenas (6 Jogos)":
-    st.sidebar.markdown("**17 Dezenas para o fechamento**")
+elif estrategia == "Fechamento Garantido (Cobertura)":
+    st.sidebar.markdown("**Pool do fechamento (16 a 18 dezenas)**")
+    st.sidebar.caption(
+        "Garantia matemática: se as 15 sorteadas estiverem no pool, "
+        "ao menos um jogo terá o mínimo de acertos escolhido."
+    )
     fixas = st.sidebar.multiselect(
-        "Escolha 17:", options=list(range(1, 26)), default=list(range(1, 18)),
+        "Pool:", options=list(range(1, 26)), default=list(range(1, 17)),
         format_func=lambda x: f"{x:02d}"
     )
-
-elif estrategia == "Matriz 13 Fixas (Ouro)":
-    st.sidebar.markdown("**13 Dezenas Fixas**")
-    fixas = st.sidebar.multiselect(
-        "Escolha 13:", options=list(range(1, 26)), default=list(range(1, 14)),
-        format_func=lambda x: f"{x:02d}"
-    )
+    garantia_fech = st.sidebar.slider("Garantia mínima de acertos", 13, 14, 14)
+    if not 16 <= len(fixas) <= 18:
+        st.sidebar.error("Selecione entre 16 e 18 dezenas.")
 
 btn_gerar = st.sidebar.button("Gerar Jogos", type="primary")
 
@@ -556,6 +623,7 @@ max_tent_sim    = st.sidebar.number_input(
 
 _opcoes_sim = [
     "Aleatório Ponderado (Rápido)",
+    "Anti-Popular",
     "Inversão Suprema",
     "Cercamento 7/8",
     "Equilíbrio IA 2026",
@@ -573,6 +641,8 @@ if btn_gerar:
     for _k in ["_sim_media_val", "_sim_estrategia", "_sim_min_acertos", "_jogo_media"]:
         st.session_state.pop(_k, None)
 
+    estrategia_exec = "Anti-Popular" if estrategia.startswith("Anti-Popular") else estrategia
+
     st.header(f"Resultados: {estrategia} — {qtd_jogos} jogo(s)")
 
     if acumulada_info > 0:
@@ -585,40 +655,36 @@ if btn_gerar:
             jogo_best, nome_best, score_best, ranking = gerar_melhor_jogo_loto(
                 frequencia, historico_sets, ultimo_resultado, pool=pool_disponivel
             )
-        st.success(f"Melhor estratégia identificada: **{nome_best}** (Score IA: {score_best:.1f})")
+        st.success(f"Menor popularidade: **{nome_best}** (Índice: {score_best:.0f})")
         col1, col2 = st.columns([1, 2])
         with col1:
             st.markdown(render_volante(jogo_best), unsafe_allow_html=True)
             st.caption(info_jogo(jogo_best))
         with col2:
-            st.subheader("Ranking das Estratégias")
+            st.subheader("Ranking por Popularidade (menor = melhor)")
+            medals = ["🥇", "🥈", "🥉"]
             for i, (nome, score) in enumerate(ranking):
-                medal = ["🥇", "🥈", "🥉", "4º", "5º"][i]
-                st.write(f"{medal} **{nome}** — Score: {score:.1f}")
+                medal = medals[i] if i < 3 else f"{i + 1}º"
+                st.write(f"{medal} **{nome}** — Índice: {score:.0f}")
         jogos_gerados.append(jogo_best)
 
-    elif estrategia == "Fechamento 17 Dezenas (6 Jogos)":
-        if len(fixas) != 17:
-            st.error("Selecione exatamente 17 dezenas.")
+    elif estrategia == "Fechamento Garantido (Cobertura)":
+        if not 16 <= len(fixas) <= 18:
+            st.error("Selecione entre 16 e 18 dezenas para o pool.")
         else:
-            fixas_5   = fixas[:5]
-            jogos_17  = gerar_fechamento_17_dezenas(fixas[:17], fixas_5)
+            with st.spinner("Calculando cobertura mínima (set cover guloso)..."):
+                jogos_fech, garantido = gerar_fechamento_garantido(fixas, garantia_fech)
+            if garantido:
+                st.success(
+                    f"✅ Garantia verificada: {len(jogos_fech)} jogos cobrem "
+                    f"{garantia_fech}+ acertos se as 15 sorteadas estiverem no pool de {len(fixas)}."
+                )
+            else:
+                st.warning("Cobertura parcial — aumente o limite de jogos ou reduza a garantia.")
+            custo = len(jogos_fech) * 3.50
+            st.caption(f"Custo estimado: {len(jogos_fech)} jogos × R$ 3,50 = R$ {custo:.2f}")
             cols = st.columns(3)
-            for i, jogo in enumerate(jogos_17):
-                with cols[i % 3]:
-                    st.markdown(f"**Jogo {i + 1}**")
-                    st.markdown(render_volante(jogo), unsafe_allow_html=True)
-                    st.caption(info_jogo(jogo))
-                    st.divider()
-                jogos_gerados.append(jogo)
-
-    elif estrategia == "Matriz 13 Fixas (Ouro)":
-        if len(fixas) != 13:
-            st.error("Selecione exatamente 13 dezenas fixas.")
-        else:
-            jogos_13 = gerar_fechamento_13_fixas(fixas[:13], list(range(1, 26)))
-            cols = st.columns(3)
-            for i, jogo in enumerate(jogos_13):
+            for i, jogo in enumerate(jogos_fech):
                 with cols[i % 3]:
                     st.markdown(f"**Jogo {i + 1}**")
                     st.markdown(render_volante(jogo), unsafe_allow_html=True)
@@ -631,16 +697,18 @@ if btn_gerar:
         for i in range(qtd_jogos):
             with st.spinner(f"Gerando jogo {i + 1}..."):
                 jogo = gerar_estrategia_loto(
-                    estrategia, frequencia, historico_sets,
+                    estrategia_exec, frequencia, historico_sets,
                     ultimo_resultado, fixas=fixas, pool=pool_disponivel
                 )
-            score = pontuar_jogo_loto(jogo, historico_sets, frequencia)
+            pop, motivos = indice_popularidade(jogo, historico_sets)
             jogos_gerados.append(jogo)
             with cols[i % 3]:
                 st.markdown(f"**Jogo {i + 1}**")
                 st.markdown(render_volante(jogo), unsafe_allow_html=True)
                 st.caption(info_jogo(jogo))
-                st.write(f"Score IA: {score:.1f}")
+                st.write(f"Popularidade: {pop:.0f} (menor = melhor)")
+                if motivos:
+                    st.caption("⚠️ " + "; ".join(motivos))
                 st.divider()
 
     if jogos_gerados:
@@ -662,6 +730,7 @@ elif btn_painel:
     pool_auto  = auto_pool_loto(historico_sets)  if historico_sets else list(range(1, 21))
 
     estrategias_painel = [
+        ("Anti-Popular",          [],         "Minimiza divisão do prêmio"),
         ("Inversão Suprema",      [],         ""),
         ("Cercamento 7/8",        [],         ""),
         ("Fixas de Ouro",         fixas_auto, f"Fixas auto: {[f'{n:02d}' for n in fixas_auto]}" if fixas_auto else ""),
@@ -679,7 +748,7 @@ elif btn_painel:
                 nome, frequencia, historico_sets,
                 ultimo_resultado, fixas=params, pool=pool_disponivel
             )
-        score = pontuar_jogo_loto(jogo, historico_sets, frequencia)
+        pop, motivos = indice_popularidade(jogo, historico_sets)
         painel_jogos.append(jogo)
         with cols[idx % 3]:
             st.markdown(f"**{nome}**")
@@ -687,7 +756,9 @@ elif btn_painel:
                 st.caption(info_str)
             st.markdown(render_volante(jogo), unsafe_allow_html=True)
             st.caption(info_jogo(jogo))
-            st.write(f"Score IA: {score:.1f}")
+            st.write(f"Popularidade: {pop:.0f} (menor = melhor)")
+            if motivos:
+                st.caption("⚠️ " + "; ".join(motivos))
             st.divider()
 
     df_exp = pd.DataFrame(painel_jogos)

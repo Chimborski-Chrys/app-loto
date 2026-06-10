@@ -12,7 +12,7 @@ st.markdown("Escolha um módulo no menu lateral **←** ou clique em um dos atal
 
 st.divider()
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
     st.subheader("🎲 Lotofácil")
@@ -25,6 +25,12 @@ with col2:
     st.write("60 números · aposte de 6 a 15 dezenas · 7 estratégias + Melhor Jogo IA.")
     if st.button("Acessar Mega Sena", use_container_width=True):
         st.switch_page("pages/2_Mega_Sena.py")
+
+with col3:
+    st.subheader("🔍 Verificador")
+    st.write("Confira seus jogos · CSV ou Excel · Lotofácil e Mega-Sena · acertos por jogo.")
+    if st.button("Acessar Verificador", use_container_width=True):
+        st.switch_page("pages/3_Verificador.py")
 
 st.divider()
 st.caption("Aviso: Este software é uma ferramenta de análise estatística. Loterias são jogos de azar e não há garantia de lucro.")
