@@ -53,7 +53,12 @@ def parse_arquivo_jogos(file):
     if not jogos:
         return [], "lotofacil"
     avg_len = sum(len(j) for j in jogos) / len(jogos)
-    tipo = "megasena" if avg_len < 15 else "lotofacil"
+    if avg_len < 5.5:          # 5 dezenas por jogo → Quina
+        tipo = "quina"
+    elif avg_len < 15:         # 6 dezenas → Mega-Sena
+        tipo = "megasena"
+    else:                      # 15+ → Lotofácil
+        tipo = "lotofacil"
     return jogos, tipo
 
 
@@ -65,7 +70,7 @@ arq = st.sidebar.file_uploader(
     help=(
         "CSV: uma linha por jogo, números separados por vírgula.\n"
         "Excel: uma linha por jogo, um número por célula (sem cabeçalho).\n\n"
-        "Detecção automática: < 15 números → Mega-Sena · ≥ 15 → Lotofácil"
+        "Detecção automática: 5 → Quina · 6 a 14 → Mega-Sena · ≥ 15 → Lotofácil"
     ),
 )
 
@@ -76,7 +81,7 @@ if arq:
     try:
         jogos, tipo = parse_arquivo_jogos(arq)
         if jogos:
-            label = "Lotofácil" if tipo == "lotofacil" else "Mega-Sena"
+            label = {"lotofacil": "Lotofácil", "megasena": "Mega-Sena", "quina": "Quina"}[tipo]
             st.sidebar.success(f"✅ {len(jogos)} jogo(s) carregado(s)")
             st.sidebar.info(f"Tipo detectado: **{label}**")
         else:
@@ -106,20 +111,21 @@ if not jogos:
 | 3 | 7 | 11 | 22 | 38 | 55 |
 
 **Detecção automática do tipo:**
-- Menos de 15 números por jogo → **Mega-Sena**
+- 5 números por jogo → **Quina**
+- 6 a 14 números por jogo → **Mega-Sena**
 - 15 ou mais números por jogo → **Lotofácil**
 """)
 else:
-    label_tipo = "Lotofácil" if tipo == "lotofacil" else "Mega-Sena"
-    nums_por_jogo = 15 if tipo == "lotofacil" else 6
+    label_tipo = {"lotofacil": "Lotofácil", "megasena": "Mega-Sena", "quina": "Quina"}[tipo]
+    nums_por_jogo = {"lotofacil": 15, "megasena": 6, "quina": 5}[tipo]
 
     st.subheader(f"🎲 {label_tipo} — {len(jogos)} jogo(s) carregado(s)")
 
-    placeholder = (
-        "01,02,03,04,05,06,07,08,09,10,11,12,13,14,15"
-        if tipo == "lotofacil"
-        else "01,02,03,04,05,06"
-    )
+    placeholder = {
+        "lotofacil": "01,02,03,04,05,06,07,08,09,10,11,12,13,14,15",
+        "megasena": "01,02,03,04,05,06",
+        "quina": "01,02,03,04,05",
+    }[tipo]
     resultado_str = st.text_input(
         f"Resultado oficial ({nums_por_jogo} números separados por vírgula):",
         key="verif_resultado",
@@ -156,6 +162,17 @@ else:
                     premio = "✅ 12 pontos"
                 elif acertos == 11:
                     premio = "✅ 11 pontos"
+                else:
+                    premio = "—"
+            elif tipo == "quina":
+                if acertos == 5:
+                    premio = "🏆 Quina"
+                elif acertos == 4:
+                    premio = "🥈 Quadra"
+                elif acertos == 3:
+                    premio = "🥉 Terno"
+                elif acertos == 2:
+                    premio = "✅ Duque"
                 else:
                     premio = "—"
             else:

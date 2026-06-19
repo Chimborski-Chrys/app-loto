@@ -127,19 +127,92 @@ def validar_quentes(jogo, quentes):
     return len(set(jogo) & set(quentes)) >= 1
 
 
+_INDICE_INEDITISMO = {"key": None, "indice": None}
+
+
+def _indice_ineditismo(historico_sets):
+    """Índice invertido dezena → concursos em que apareceu (cache por lista)."""
+    key = (id(historico_sets), len(historico_sets))
+    if _INDICE_INEDITISMO["key"] != key:
+        indice = {}
+        for idx, s in enumerate(historico_sets):
+            for n in s:
+                indice.setdefault(n, []).append(idx)
+        _INDICE_INEDITISMO["key"] = key
+        _INDICE_INEDITISMO["indice"] = indice
+    return _INDICE_INEDITISMO["indice"]
+
+
 def validar_ineditismo(jogo, historico_sets):
-    """Jogo não pode ter 5 ou mais dezenas em comum com qualquer resultado histórico."""
-    jogo_set = set(jogo)
-    for h in historico_sets:
-        if len(jogo_set & h) >= 5:
-            return False
-    return True
+    """
+    Jogo não pode ter 5 ou mais dezenas em comum com qualquer resultado histórico.
+    Usa índice invertido: O(dezenas × ocorrências) em vez de O(concursos) por jogo.
+    """
+    if not historico_sets:
+        return True
+    indice = _indice_ineditismo(historico_sets)
+    cont = Counter()
+    for n in jogo:
+        cont.update(indice.get(n, ()))
+    return not cont or max(cont.values()) < 5
 
 
 def validar_quadrantes(jogo):
     """Dezenas distribuídas em pelo menos 3 dos 4 quadrantes do volante."""
     jogo_set = set(jogo)
     return sum(1 for q in QUADRANTES if jogo_set & q) >= 3
+
+
+def _eh_progressao_aritmetica(jogo):
+    s = sorted(jogo)
+    if len(s) < 3:
+        return False
+    passo = s[1] - s[0]
+    return all(s[i + 1] - s[i] == passo for i in range(len(s) - 1))
+
+
+def validar_popularidade(jogo):
+    """
+    Filtro anti-popularidade: evita padrões jogados em massa, que dividem
+    o prêmio em caso de acerto. Único filtro com ganho real de valor esperado.
+    Regras: pelo menos 1 dezena > 31 (fuga de datas de aniversário) e
+    jogo não pode ser uma progressão aritmética completa (5,10,15... etc).
+    """
+    if not any(n > 31 for n in jogo):
+        return False
+    if _eh_progressao_aritmetica(jogo):
+        return False
+    return True
+
+
+def pontuar_anti_popularidade(jogo):
+    """
+    Score 0–100: quanto maior, menos provável o jogo ser escolhido por
+    outros apostadores (datas, padrões visuais, dezenas 'redondas').
+    """
+    n = len(jogo)
+    score = 100.0
+
+    # Dezenas ≤ 31 lembram datas; quanto mais, mais popular o jogo
+    aniversario = sum(1 for x in jogo if x <= 31)
+    score -= (aniversario / n) * 35
+
+    # Múltiplos de 5/10 são visualmente atraentes no volante
+    redondos = sum(1 for x in jogo if x % 5 == 0)
+    if redondos > 1:
+        score -= (redondos - 1) * 8
+
+    # Concentração em poucas linhas do volante (padrão visual)
+    linhas = Counter((x - 1) // 10 for x in jogo)
+    if max(linhas.values()) >= max(3, n // 2):
+        score -= 15
+
+    # Pares consecutivos (datas próximas, padrões)
+    s = sorted(jogo)
+    consecutivos = sum(1 for i in range(len(s) - 1) if s[i] + 1 == s[i + 1])
+    score -= consecutivos * 5
+
+    return max(0.0, round(score, 1))
 
 
 def validar_jogo_mega(jogo, historico_sets, quentes):
@@ -151,6 +224,7 @@ def validar_jogo_mega(jogo, historico_sets, quentes):
         and validar_quentes(jogo, quentes)
         and validar_ineditismo(jogo, historico_sets)
         and validar_quadrantes(jogo)
+        and validar_popularidade(jogo)
     )
 
 
@@ -554,18 +628,79 @@ def auto_pool_mega(historico_sets, frequencia, tamanho=15):
 
 
 def pontuar_jogo_mega(jogo, historico_sets, quentes, frequencia):
-    if not historico_sets:
-        return 0.0
+    """
+    Score 0–100 baseado no único critério com efeito real no valor esperado
+    (anti-popularidade) + bônus de equilíbrio estrutural. O componente antigo
+    de 'acertos médios contra o histórico' foi removido: ele favorecia números
+    quentes que o filtro de ineditismo combate — métricas que se cancelavam.
+    """
     jogo_set = set(jogo)
-    acertos_med = sum(len(jogo_set & h) for h in historico_sets) / len(historico_sets)
-    score_quentes = len(jogo_set & set(quentes)) * 10
-    score_quad = sum(1 for q in QUADRANTES if jogo_set & q) * 15
+    base = pontuar_anti_popularidade(jogo)  # 0–100
+
+    score_quad = sum(1 for q in QUADRANTES if jogo_set & q) * 2.5   # até 10
     pares = sum(1 for n in jogo if n % 2 == 0)
-    score_par = 20 if abs(pares - len(jogo) / 2) <= 1 else 0
-    return round(acertos_med * 10 + score_quentes + score_quad + score_par, 2)
+    score_par = 5 if abs(pares - len(jogo) / 2) <= 1 else 0
+
+    return round(min(100.0, base * 0.85 + score_quad + score_par), 1)
 
 
 # ── SIMULAÇÃO ──────────────────────────────────────────────────────────────────
+
+def backtest_walk_forward(historico_sets, estrategia, n_numeros, n_concursos,
+                          jogos_por_concurso, pool=None, progress_cb=None):
+    """
+    Backtest sem vazamento de informação: para cada um dos últimos n_concursos,
+    gera jogos usando APENAS o histórico anterior àquele concurso e mede os
+    acertos contra o resultado real. É o teste honesto de capacidade preditiva —
+    diferente da simulação contra alvo conhecido, que favorece estratégias cujo
+    pool contém o alvo por construção.
+    Retorna lista de dicts por concurso + lista plana de acertos.
+    """
+    total = len(historico_sets)
+    n_concursos = min(n_concursos, total - 30)  # exige base mínima de treino
+    if n_concursos <= 0:
+        return [], []
+
+    inicio = total - n_concursos
+    resultados = []
+    todos_acertos = []
+
+    for i, k in enumerate(range(inicio, total)):
+        hist_k = historico_sets[:k]
+        alvo = historico_sets[k]
+        freq_k = calcular_frequencia(hist_k)
+        quentes_k = top_quentes(freq_k, 10)
+
+        acertos_conc = []
+        for _ in range(jogos_por_concurso):
+            jogo = gerar_estrategia_mega(
+                estrategia, n_numeros, freq_k, hist_k, quentes_k,
+                num_concurso=k + 1, pool=pool,
+            )
+            acertos_conc.append(len(set(jogo) & alvo))
+
+        todos_acertos.extend(acertos_conc)
+        resultados.append({
+            "Concurso (idx)": k + 1,
+            "Resultado": " ".join(f"{n:02d}" for n in sorted(alvo)),
+            "Média acertos": round(sum(acertos_conc) / len(acertos_conc), 2),
+            "Melhor jogo": max(acertos_conc),
+            "Jogos 4+": sum(1 for a in acertos_conc if a >= 4),
+        })
+        if progress_cb:
+            progress_cb((i + 1) / n_concursos)
+
+    return resultados, todos_acertos
+
+
+def estatisticas_teoricas(n_numeros):
+    """Média e P(≥4) teóricas de um jogo uniforme de n_numeros dezenas."""
+    media = 6 * n_numeros / 60
+    total = comb(60, n_numeros)
+    p4 = sum(comb(6, k) * comb(54, n_numeros - k)
+             for k in range(4, min(7, n_numeros + 1))) / total
+    return media, p4
+
 
 def simular_ate_acertar(resultado_alvo, min_acertos, n_numeros, frequencia, pool, max_tentativas,
                         quentes=None, num_concurso=1,
@@ -868,6 +1003,24 @@ max_tent_sim    = st.sidebar.number_input(
 )
 btn_simular = st.sidebar.button("🔬 Iniciar Simulação")
 
+st.sidebar.divider()
+st.sidebar.header("6. Backtest Walk-Forward")
+st.sidebar.caption(
+    "Teste honesto: gera jogos usando só o histórico ANTERIOR a cada concurso "
+    "e mede acertos no resultado real seguinte. Sem vazamento de informação."
+)
+_opcoes_bt = [
+    "Frequência e Tendência",
+    "Equilíbrio do Volante",
+    "Números Atrasados",
+    "Técnica do Z",
+    "Técnica +3/-3",
+]
+estrategia_bt = st.sidebar.selectbox("Estratégia do backtest:", _opcoes_bt)
+n_concursos_bt = st.sidebar.slider("Últimos N concursos", 10, 200, 50, step=10)
+jogos_bt = st.sidebar.slider("Jogos por concurso", 1, 50, 10)
+btn_backtest = st.sidebar.button("📈 Rodar Backtest")
+
 
 # ── MAIN AREA ──────────────────────────────────────────────────────────────────
 
@@ -900,7 +1053,7 @@ if btn_gerar:
                 st.success(f"Estratégia eleita: **{nome_venc}**")
                 st.markdown(render_volante_mega(jogo), unsafe_allow_html=True)
                 st.caption(info_jogo(jogo, quentes_global))
-                st.write(f"Score IA: **{score_venc:.1f}**")
+                st.write(f"Score (anti-popularidade): **{score_venc:.1f}**")
                 with st.expander("Ver ranking interno"):
                     for pos, r in enumerate(ranking):
                         st.write(f"{pos + 1}º {r['nome']} — Score: {r['score']:.1f}")
@@ -1018,7 +1171,7 @@ elif btn_painel:
                 st.caption(info)
             st.markdown(render_volante_mega(jogo), unsafe_allow_html=True)
             st.caption(info_jogo(jogo, quentes_global))
-            st.write(f"Score IA: {score:.1f}")
+            st.write(f"Score (anti-popularidade): {score:.1f}")
             st.divider()
 
     df_export = pd.DataFrame(painel_jogos)
@@ -1137,6 +1290,65 @@ elif btn_simular:
             st.session_state["_sim_min_acertos"] = min_acertos_sim
             st.session_state.pop("_jogo_media", None)
 
+elif btn_backtest:
+    if not historico_sets or len(historico_sets) < 40:
+        st.error("Backtest exige histórico carregado com pelo menos 40 concursos.")
+    else:
+        st.header(f"📈 Backtest Walk-Forward — {estrategia_bt}")
+        st.caption(
+            f"Últimos **{n_concursos_bt}** concursos · **{jogos_bt}** jogos de "
+            f"**{n_numeros}** dezenas por concurso · treino apenas com dados anteriores."
+        )
+
+        media_teo, p4_teo = estatisticas_teoricas(n_numeros)
+
+        progress = st.progress(0, text="Rodando backtest...")
+        resultados_bt, acertos_bt = backtest_walk_forward(
+            historico_sets, estrategia_bt, n_numeros,
+            n_concursos_bt, jogos_bt, pool=pool_disponivel,
+            progress_cb=lambda f: progress.progress(f, text=f"Backtest: {f*100:.0f}%"),
+        )
+        progress.progress(1.0, text="Concluído!")
+
+        if not acertos_bt:
+            st.warning("Histórico insuficiente para o backtest configurado.")
+        else:
+            media_obs = sum(acertos_bt) / len(acertos_bt)
+            p4_obs = sum(1 for a in acertos_bt if a >= 4) / len(acertos_bt)
+            dist = Counter(acertos_bt)
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Jogos avaliados", f"{len(acertos_bt):,}")
+            c2.metric("Média de acertos", f"{media_obs:.3f}",
+                      delta=f"{media_obs - media_teo:+.3f} vs teórico ({media_teo:.3f})")
+            c3.metric("% jogos com 4+", f"{p4_obs*100:.3f}%",
+                      delta=f"{(p4_obs - p4_teo)*100:+.3f} p.p. vs teórico ({p4_teo*100:.3f}%)")
+            c4.metric("Melhor jogo", f"{max(acertos_bt)} acertos")
+
+            st.subheader("Distribuição de acertos")
+            df_dist = pd.DataFrame({
+                "Acertos": list(range(0, 7)),
+                "Jogos": [dist.get(a, 0) for a in range(0, 7)],
+            })
+            st.bar_chart(df_dist.set_index("Acertos"))
+
+            with st.expander("Detalhe por concurso"):
+                st.dataframe(pd.DataFrame(resultados_bt),
+                             use_container_width=True, hide_index=True)
+
+            desvio = (media_obs - media_teo) / media_teo * 100
+            if abs(desvio) < 5:
+                veredito = ("estatisticamente indistinguível do sorteio uniforme — "
+                            "como esperado para um jogo de azar. O valor das estratégias "
+                            "está nos filtros anti-popularidade (prêmio menos dividido), "
+                            "não em prever dezenas.")
+            elif desvio > 0:
+                veredito = (f"{desvio:.1f}% acima do teórico nesta amostra. Cuidado: com "
+                            "amostras pequenas isso é ruído estatístico, não edge.")
+            else:
+                veredito = f"{abs(desvio):.1f}% abaixo do teórico nesta amostra (ruído estatístico)."
+            st.info(f"**Veredito:** a estratégia **{estrategia_bt}** ficou {veredito}")
+
 else:
     if "_sim_media_val" not in st.session_state:
         st.info("Configure a estratégia na lateral e clique em 'Gerar Jogos'.")
@@ -1165,12 +1377,13 @@ else:
         | Filtro | Regra |
         |--------|-------|
         | Soma | Proporcional à faixa 150–220 para 6 dezenas |
-        | Paridade | Entre 25% e 70% de números pares |
+        | Paridade | Entre 1 e n-1 pares (~17% a ~83%) — só descarta extremos |
         | Sequência | Máximo 2 números consecutivos |
         | Finais | Máximo 2 dezenas com o mesmo algarismo final |
         | Quentes | Pelo menos 1 número do top-10 histórico |
         | Ineditismo | Sem 5+ dezenas em comum com qualquer resultado histórico |
         | Quadrantes | Distribuídas em pelo menos 3 dos 4 quadrantes do volante |
+        | Anti-popularidade | Ao menos 1 dezena >31 e sem progressões aritméticas — reduz divisão do prêmio |
         """)
 
 # ── JOGO DA MÉDIA ──────────────────────────────────────────────────────────────
@@ -1191,16 +1404,16 @@ if "_sim_media_val" in st.session_state and historico_sets:
 
     if st.button(f"Gerar jogo #{_cap:,}", key="btn_jogo_media"):
         _est_uso = _est if _est != "Aleatório Ponderado (Rápido)" else "Frequência e Tendência"
-        with st.spinner(f"Gerando {_cap:,} jogos com {_est_uso}..."):
-            _jogo = None
-            for _ in range(_cap):
-                _jogo = gerar_estrategia_mega(
-                    _est_uso, _nn, frequencia,
-                    historico_sets=[],          # ineditismo desabilitado para performance
-                    quentes=quentes_global,
-                    num_concurso=proximo_concurso,
-                    pool=pool_disponivel,
-                )
+        # Nota: gerar N jogos e pegar o último é idêntico a gerar 1 direto —
+        # cada geração é independente. O loop anterior só gastava CPU.
+        with st.spinner(f"Gerando jogo com {_est_uso}..."):
+            _jogo = gerar_estrategia_mega(
+                _est_uso, _nn, frequencia,
+                historico_sets=[],          # ineditismo desabilitado para performance
+                quentes=quentes_global,
+                num_concurso=proximo_concurso,
+                pool=pool_disponivel,
+            )
         st.session_state["_jogo_media"] = _jogo
 
     if st.session_state.get("_jogo_media"):
