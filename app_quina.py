@@ -309,22 +309,70 @@ def analisar_ciclo_quina(historico_sets):
     return ciclos, sorted(faltantes), aberto, media_ciclo
 
 
-def estrategia_faltantes(historico_sets, n_numeros):
+def dezenas_abertura_ciclo(historico_sets):
     """
-    Gera um jogo com as N dezenas que faltam fechar o ciclo atual (as mais
-    'devidas'). Se faltarem menos de N, completa com as dezenas mais atrasadas.
-    Ordena as faltantes pelo maior atraso (prioriza quem sumiu há mais tempo).
+    Frequência de cada dezena como 'abridora' de ciclo: percorre o histórico e,
+    sempre que um ciclo fecha (todas as 80 saíram), o concurso seguinte abre um
+    novo ciclo — suas dezenas somam +1 no contador. O 1º concurso do histórico
+    também conta como abertura. Dezenas com contagem alta tendem a sair logo no
+    início de um novo ciclo.
+    """
+    aberturas = Counter()
+    seen = set()
+    abrindo = True
+    for s in historico_sets:
+        if abrindo:
+            aberturas.update(s)
+            abrindo = False
+        seen |= s
+        if len(seen) == TOTAL:
+            seen = set()
+            abrindo = True          # próximo concurso abre o ciclo seguinte
+    return aberturas
+
+
+def _amostra_ponderada(pesos, k):
+    """Amostra k itens distintos sem reposição, com probabilidade ∝ peso."""
+    itens = list(pesos.keys())
+    w = [max(0.0001, pesos[i]) for i in itens]
+    escolhidos = []
+    while itens and len(escolhidos) < k:
+        i = random.choices(range(len(itens)), weights=w, k=1)[0]
+        escolhidos.append(itens.pop(i))
+        w.pop(i)
+    return escolhidos
+
+
+def estrategia_faltantes(historico_sets, n_numeros, mesclar_abertura=True):
+    """
+    Monta um jogo focado nas dezenas que faltam fechar o ciclo atual (as mais
+    'devidas'), com sorteio ponderado — varia a cada clique.
+
+    • Muitas faltantes (ciclo recém-aberto): amostra ponderada pelo atraso.
+    • Poucas faltantes (ciclo quase fechando): TODAS as faltantes entram e o
+      restante mescla as dezenas que historicamente ABREM novos ciclos
+      (tendência de sair no fechamento/abertura) + mais atrasadas.
     """
     _, faltantes, _, _ = analisar_ciclo_quina(historico_sets)
-    faltantes = sorted(faltantes, key=lambda n: atraso_dezena(historico_sets, n), reverse=True)
-    escolhidas = list(faltantes[:n_numeros])
-    if len(escolhidas) < n_numeros:
-        for n in numeros_atrasados(historico_sets, TOTAL):
-            if n not in escolhidas:
-                escolhidas.append(n)
-            if len(escolhidas) >= n_numeros:
-                break
-    return sorted(escolhidas[:n_numeros])
+    n_hist = max(1, len(historico_sets))
+    aberturas = dezenas_abertura_ciclo(historico_sets) if mesclar_abertura else Counter()
+    max_ab = max(aberturas.values()) if aberturas else 1
+
+    if len(faltantes) >= n_numeros:
+        pesos = {n: 0.5 + atraso_dezena(historico_sets, n) / n_hist for n in faltantes}
+        return sorted(_amostra_ponderada(pesos, n_numeros))
+
+    escolhidas = list(faltantes)                         # poucas faltantes: todas entram
+    pesos = {}
+    for n in range(1, TOTAL + 1):
+        if n in escolhidas:
+            continue
+        peso = 0.4 + atraso_dezena(historico_sets, n) / n_hist
+        if aberturas.get(n):
+            peso += 2.5 * aberturas[n] / max_ab          # tendência de abertura de ciclo
+        pesos[n] = peso
+    escolhidas += _amostra_ponderada(pesos, n_numeros - len(escolhidas))
+    return sorted(escolhidas)
 
 
 # ── ESTRATÉGIA ALEATÓRIA FILTRADA ───────────────────────────────────────────────
@@ -336,6 +384,28 @@ def _completar_jogo(dezenas, n_numeros, pool=None):
     if faltam > 0 and len(restante) >= faltam:
         dezenas.update(random.sample(restante, faltam))
     return dezenas
+
+
+def expandir_jogo(jogo, n_alvo, pool=None, frequencia=None):
+    """
+    Ajusta um jogo para exatamente n_alvo dezenas (aposta Quina 5–15).
+    Se faltam dezenas, completa com as mais frequentes do pool disponível
+    (desempate aleatório quando não há frequência). Se sobram, trunca.
+    """
+    dz = list(dict.fromkeys(int(x) for x in jogo))   # remove duplicatas, mantém ordem
+    if len(dz) >= n_alvo:
+        return sorted(dz[:n_alvo])
+    p = pool if pool is not None else TODAS
+    candidatos = [n for n in p if n not in dz]
+    if frequencia:
+        candidatos.sort(key=lambda n: frequencia.get(n, 0), reverse=True)
+    else:
+        random.shuffle(candidatos)
+    for c in candidatos:
+        if len(dz) >= n_alvo:
+            break
+        dz.append(c)
+    return sorted(dz)
 
 
 def gerar_aleatorio_filtrado(n_numeros, historico_sets, frequencia, pool=None):
@@ -478,6 +548,14 @@ estrategia = st.sidebar.selectbox("Método", [
 ])
 
 st.sidebar.divider()
+st.sidebar.header("3. Dezenas por Jogo")
+dezenas_por_jogo = st.sidebar.slider(
+    "Dezenas por jogo (aposta Quina 5–15)", PADRAO, 15, PADRAO,
+    help="Quantas dezenas o sistema coloca em cada jogo. 5 = aposta mínima. "
+         "Nos desdobramentos, cada jogo é completado com as dezenas mais quentes do conjunto."
+)
+
+st.sidebar.divider()
 st.sidebar.header("🚫 Excluir Números")
 excluidos = st.sidebar.multiselect(
     "Remova dezenas do volante:",
@@ -520,10 +598,14 @@ elif estrategia == "Método 3 — Matriz 7→4":
 
 elif estrategia == "Método 4 — Fechamento dos Faltantes":
     st.sidebar.info("Identifica as dezenas que faltam fechar o ciclo (todas as 80 saírem) e monta um jogo com elas.")
-    n_faltantes = st.sidebar.slider("Quantidade de dezenas no jogo", 5, 15, 6)
+    mesclar_abertura = st.sidebar.checkbox(
+        "Mesclar dezenas de abertura de ciclo", value=True,
+        help="Quando o ciclo está quase fechando, inclui dezenas que historicamente abrem novos ciclos."
+    )
+    st.sidebar.caption(f"Jogo com {dezenas_por_jogo} dezenas (ajuste em 'Dezenas por Jogo'). Sorteio varia a cada clique.")
 
 else:  # Aleatório Filtrado
-    n_aleatorio = st.sidebar.slider("Números por jogo", 5, 15, 5)
+    st.sidebar.caption(f"Cada jogo terá {dezenas_por_jogo} dezenas (ajuste em 'Dezenas por Jogo').")
     qtd_aleatorio = st.sidebar.slider("Quantidade de jogos", 1, 50, 5)
 
 st.sidebar.divider()
@@ -545,6 +627,11 @@ if btn_gerar:
             st.error(f"Selecione exatamente 25 dezenas (atual: {len(sel_25)}).")
         else:
             jogos_gerados = desdobramento_25_em_9(sel_25)
+            if dezenas_por_jogo > PADRAO:
+                jogos_gerados = [
+                    expandir_jogo(j, dezenas_por_jogo, pool=set(sel_25), frequencia=frequencia)
+                    for j in jogos_gerados
+                ]
             cobertura = set()
             for j in jogos_gerados:
                 cobertura |= set(j)
@@ -570,8 +657,10 @@ if btn_gerar:
 
         if r1 and r2 and r3 and len(r1) == len(r2) == len(r3) == 5:
             jogo = fechamento_media_posicional(r1, r2, r3)
+            if dezenas_por_jogo > PADRAO:
+                jogo = expandir_jogo(jogo, dezenas_por_jogo, pool=pool_disponivel, frequencia=frequencia)
             jogos_gerados = [jogo]
-            st.success("✅ Jogo gerado pela média posicional truncada.")
+            st.success(f"✅ Jogo gerado pela média posicional truncada ({len(jogo)} dezenas).")
             # mostra o cálculo coluna a coluna
             a, b, c = sorted(r1), sorted(r2), sorted(r3)
             df_calc = pd.DataFrame({
@@ -603,6 +692,11 @@ if btn_gerar:
 
         if dezenas_7:
             jogos_gerados = desdobramento_7_em_4(dezenas_7)
+            if dezenas_por_jogo > PADRAO:
+                jogos_gerados = [
+                    expandir_jogo(j, dezenas_por_jogo, pool=set(dezenas_7), frequencia=frequencia)
+                    for j in jogos_gerados
+                ]
             st.success("✅ 4 jogos gerados · garantia de Quadra se 5 das 7 dezenas saírem.")
             grade_jogos(jogos_gerados)
             exportar_csv(jogos_gerados, "quina_metodo3_7x4.csv")
@@ -613,7 +707,8 @@ if btn_gerar:
             st.error("Carregue o histórico para analisar o ciclo de fechamento.")
         else:
             ciclos, faltantes, conc_aberto, media_ciclo = analisar_ciclo_quina(historico_sets)
-            jogo = estrategia_faltantes(historico_sets, n_faltantes)
+            abridoras = dezenas_abertura_ciclo(historico_sets)
+            jogo = estrategia_faltantes(historico_sets, dezenas_por_jogo, mesclar_abertura=mesclar_abertura)
             jogos_gerados = [jogo]
 
             c1, c2, c3 = st.columns(3)
@@ -636,10 +731,20 @@ if btn_gerar:
             if ciclos:
                 st.caption(f"Ciclos históricos (concursos p/ fechar as 80): {ciclos[-10:]}")
 
-            st.success(f"✅ Jogo com as {n_faltantes} dezenas mais 'devidas' do ciclo atual.")
-            st.write("**Faltantes (por atraso):** " + " · ".join(
+            st.success(f"✅ Jogo com as {dezenas_por_jogo} dezenas mais 'devidas' do ciclo atual.")
+            st.write("**Faltantes (por atraso):** " + (" · ".join(
                 f"{n:02d}" for n in sorted(faltantes, key=lambda n: atraso_dezena(historico_sets, n), reverse=True)[:20]
-            ) or "—")
+            ) or "—"))
+            if mesclar_abertura and abridoras:
+                top_abrid = abridoras.most_common(12)
+                st.write("**Dezenas que mais abrem ciclo:** " + " · ".join(
+                    f"{n:02d} ({c}×)" for n, c in top_abrid
+                ))
+                if len(faltantes) < dezenas_por_jogo:
+                    st.caption(
+                        f"Ciclo quase fechando ({len(faltantes)} faltante(s)): as faltantes entram fixas "
+                        "e o restante do jogo mescla as abridoras acima."
+                    )
             grade_jogos(jogos_gerados)
             exportar_csv(jogos_gerados, "quina_metodo4_faltantes.csv")
 
@@ -648,7 +753,7 @@ if btn_gerar:
         with st.spinner(f"Gerando {qtd_aleatorio} jogo(s)..."):
             for _ in range(qtd_aleatorio):
                 jogos_gerados.append(
-                    gerar_aleatorio_filtrado(n_aleatorio, historico_sets, frequencia, pool=pool_disponivel)
+                    gerar_aleatorio_filtrado(dezenas_por_jogo, historico_sets, frequencia, pool=pool_disponivel)
                 )
         grade_jogos(jogos_gerados)
         exportar_csv(jogos_gerados, "quina_aleatorio.csv")

@@ -2,9 +2,12 @@ import streamlit as st
 import pandas as pd
 import random
 import time
+import io
 from collections import Counter
 from math import comb
 from itertools import combinations
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill
 
 st.set_page_config(
     page_title="Lotofácil Pro — IA & Engenharia de Dados",
@@ -53,6 +56,22 @@ def validar_ineditismo(jogo, historico_sets):
 
 def validar_jogo_loto(jogo, historico_sets):
     return validar_soma(jogo) and validar_sequencia(jogo) and validar_ineditismo(jogo, historico_sets)
+
+def validar_curva_acertos(jogo, historico_sets, janela=30):
+    """Indicador informativo (não é filtro de geração): média de acertos do jogo
+    contra os últimos `janela` concursos. Pela distribuição hipergeométrica, a
+    média esperada de qualquer combinação de 15 dezenas contra o histórico é ~9,
+    com baixíssima variância — isto é, quase todo jogo cai nessa faixa, o que é
+    comportamento estatístico normal e não prediz o resultado do próximo sorteio
+    (concursos são eventos independentes)."""
+    if not historico_sets:
+        return True
+    recentes = historico_sets[-janela:] if len(historico_sets) >= janela else historico_sets
+    if not recentes:
+        return True
+    js = set(jogo)
+    media = sum(len(js & h) for h in recentes) / len(recentes)
+    return round(media) not in (8, 9, 10)
 
 # ── FUNÇÕES AUXILIARES ─────────────────────────────────────────────────────────
 def calcular_frequencia(historico_sets):
@@ -376,6 +395,65 @@ def gerar_estrategia_loto(tipo, frequencia, historico_sets, ultimo, fixas=None, 
         return gerar_anti_popular(historico_sets, pool=p)
     return _fallback(historico_sets, pool=p)
 
+# ── JOGO MÚLTIPLO ───────────────────────────────────────────────────────────────
+ESTRATEGIAS_MULTIPLO = [
+    "Anti-Popular",
+    "Inversão Suprema",
+    "Cercamento 7/8",
+    "Equilíbrio IA 2026",
+    "Ranking Frequência",
+    "Rastreio Ciclo 3",
+]
+
+CORES_ESTRATEGIA = {
+    "Anti-Popular":         "FFD6D6",
+    "Inversão Suprema":     "D6E6FF",
+    "Cercamento 7/8":       "D6FFDA",
+    "Equilíbrio IA 2026":   "FFF3D6",
+    "Ranking Frequência":   "EAD6FF",
+    "Rastreio Ciclo 3":     "D6FFF6",
+}
+
+def gerar_jogo_multiplo(qtd_por_estrategia, frequencia, historico_sets, ultimo, pool=None):
+    """Gera `qtd_por_estrategia` jogos de CADA uma das 6 estratégias principais,
+    em blocos agrupados (todos os jogos de uma estratégia antes de passar para a
+    próxima — sem intercalar). Total de jogos = qtd_por_estrategia * 6.
+    Cada jogo é validado contra o histórico + os jogos já gerados neste lote
+    (evita repetir a mesma combinação dentro do próprio múltiplo)."""
+    jogos = []
+    sets_lote = list(historico_sets)
+    for tipo in ESTRATEGIAS_MULTIPLO:
+        for _ in range(qtd_por_estrategia):
+            jogo = None
+            for _ in range(20):
+                candidato = gerar_estrategia_loto(tipo, frequencia, historico_sets, ultimo, pool=pool)
+                if validar_ineditismo(candidato, sets_lote):
+                    jogo = candidato
+                    break
+            if jogo is None:
+                jogo = candidato
+            sets_lote.append(set(jogo))
+            jogos.append((jogo, tipo))
+    return jogos
+
+def exportar_multiplo_xlsx(resultado_multiplo):
+    """Monta um .xlsx com uma linha por jogo, coluna 'Estrategia' e cor de
+    fundo diferente por estratégia (CSV puro não suporta cor de célula)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Jogo Multiplo"
+    ws.append([f"Bola{i}" for i in range(1, 16)] + ["Estrategia"])
+    for jogo, tipo in resultado_multiplo:
+        ws.append(list(jogo) + [tipo])
+        fill = PatternFill(start_color=CORES_ESTRATEGIA.get(tipo, "FFFFFF"),
+                            end_color=CORES_ESTRATEGIA.get(tipo, "FFFFFF"),
+                            fill_type="solid")
+        for cell in ws[ws.max_row]:
+            cell.fill = fill
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
 # ── PONTUAÇÃO (popularidade — menor é melhor) ──────────────────────────────────
 def pontuar_jogo_loto(jogo, historico_sets, frequencia):
     pen, _ = indice_popularidade(jogo, historico_sets)
@@ -537,7 +615,10 @@ excluir_nums = st.sidebar.multiselect(
 )
 pool_disponivel = (TODAS - set(excluir_nums)) if excluir_nums else None
 
-qtd_jogos = st.sidebar.slider("Quantidade de jogos", min_value=1, max_value=50, value=5)
+qtd_jogos = st.sidebar.slider(
+    "Quantidade de jogos", min_value=1, max_value=50, value=5,
+    help="Em 'Jogo Múltiplo (6 Estratégias)' este valor é por estratégia (total = valor × 6)."
+)
 
 # ── Sidebar 3: Estratégia ─────────────────────────────────────────────────────
 st.sidebar.divider()
@@ -546,6 +627,7 @@ st.sidebar.header("3. Escolher Estratégia")
 estrategia = st.sidebar.selectbox("Estratégia", [
     "Anti-Popular (Recomendado)",
     "Melhor Jogo (IA)",
+    "Jogo Múltiplo (6 Estratégias)",
     "Inversão Suprema",
     "Cercamento 7/8",
     "Fixas de Ouro",
@@ -643,7 +725,11 @@ if btn_gerar:
 
     estrategia_exec = "Anti-Popular" if estrategia.startswith("Anti-Popular") else estrategia
 
-    st.header(f"Resultados: {estrategia} — {qtd_jogos} jogo(s)")
+    if estrategia == "Jogo Múltiplo (6 Estratégias)":
+        _total_multiplo = qtd_jogos * len(ESTRATEGIAS_MULTIPLO)
+        st.header(f"Resultados: {estrategia} — {qtd_jogos} por estratégia ({_total_multiplo} no total)")
+    else:
+        st.header(f"Resultados: {estrategia} — {qtd_jogos} jogo(s)")
 
     if acumulada_info > 0:
         st.warning(f"🔥 Lotofácil ACUMULADA há {acumulada_info} concurso(s)!")
@@ -667,6 +753,51 @@ if btn_gerar:
                 medal = medals[i] if i < 3 else f"{i + 1}º"
                 st.write(f"{medal} **{nome}** — Índice: {score:.0f}")
         jogos_gerados.append(jogo_best)
+
+    elif estrategia == "Jogo Múltiplo (6 Estratégias)":
+        _total_multiplo = qtd_jogos * len(ESTRATEGIAS_MULTIPLO)
+        if _total_multiplo > 90:
+            st.warning(f"{_total_multiplo} jogos no total — geração/renderização pode demorar.")
+        with st.spinner(f"Gerando {qtd_jogos} jogo(s) de cada uma das 6 estratégias ({_total_multiplo} no total)..."):
+            resultado_multiplo = gerar_jogo_multiplo(
+                qtd_jogos, frequencia, historico_sets, ultimo_resultado, pool=pool_disponivel
+            )
+        st.caption(
+            f"Blocos agrupados (sem intercalar), {qtd_jogos} por estratégia: "
+            "Anti-Popular → Inversão Suprema → Cercamento 7/8 → Equilíbrio IA 2026 → Ranking Frequência → Rastreio Ciclo 3"
+        )
+        _tipo_atual = None
+        cols = st.columns(3)
+        for i, (jogo, tipo) in enumerate(resultado_multiplo):
+            if tipo != _tipo_atual:
+                st.subheader(tipo)
+                cols = st.columns(3)
+                _tipo_atual = tipo
+                _idx_bloco = 0
+            pop, motivos = indice_popularidade(jogo, historico_sets)
+            curva_segura = validar_curva_acertos(jogo, historico_sets)
+            jogos_gerados.append(jogo)
+            with cols[_idx_bloco % 3]:
+                st.markdown(f"**Jogo {_idx_bloco + 1}**")
+                st.markdown(render_volante(jogo), unsafe_allow_html=True)
+                st.caption(info_jogo(jogo))
+                st.write(f"Popularidade: {pop:.0f} (menor = melhor)")
+                if motivos:
+                    st.caption("⚠️ " + "; ".join(motivos))
+                st.caption(
+                    f"Distopia de Acertos: {'Foge dos 79% (Seguro)' if curva_segura else 'Risco de 8-10 pontos'} "
+                    "*(indicador estatístico, não altera a chance real — sorteios são independentes)*"
+                )
+                st.divider()
+            _idx_bloco += 1
+
+        xlsx_bytes = exportar_multiplo_xlsx(resultado_multiplo)
+        st.download_button(
+            "⬇️ Baixar Jogo Múltiplo (Excel colorido por estratégia)",
+            xlsx_bytes,
+            "jogo_multiplo_lotofacil.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     elif estrategia == "Fechamento Garantido (Cobertura)":
         if not 16 <= len(fixas) <= 18:
@@ -701,6 +832,7 @@ if btn_gerar:
                     ultimo_resultado, fixas=fixas, pool=pool_disponivel
                 )
             pop, motivos = indice_popularidade(jogo, historico_sets)
+            curva_segura = validar_curva_acertos(jogo, historico_sets)
             jogos_gerados.append(jogo)
             with cols[i % 3]:
                 st.markdown(f"**Jogo {i + 1}**")
@@ -709,6 +841,10 @@ if btn_gerar:
                 st.write(f"Popularidade: {pop:.0f} (menor = melhor)")
                 if motivos:
                     st.caption("⚠️ " + "; ".join(motivos))
+                st.caption(
+                    f"Distopia de Acertos: {'Foge dos 79% (Seguro)' if curva_segura else 'Risco de 8-10 pontos'} "
+                    "*(indicador estatístico, não altera a chance real — sorteios são independentes)*"
+                )
                 st.divider()
 
     if jogos_gerados:
@@ -749,6 +885,7 @@ elif btn_painel:
                 ultimo_resultado, fixas=params, pool=pool_disponivel
             )
         pop, motivos = indice_popularidade(jogo, historico_sets)
+        curva_segura = validar_curva_acertos(jogo, historico_sets)
         painel_jogos.append(jogo)
         with cols[idx % 3]:
             st.markdown(f"**{nome}**")
@@ -759,6 +896,10 @@ elif btn_painel:
             st.write(f"Popularidade: {pop:.0f} (menor = melhor)")
             if motivos:
                 st.caption("⚠️ " + "; ".join(motivos))
+            st.caption(
+                f"Distopia de Acertos: {'Foge dos 79% (Seguro)' if curva_segura else 'Risco de 8-10 pontos'} "
+                "*(indicador estatístico, não altera a chance real — sorteios são independentes)*"
+            )
             st.divider()
 
     df_exp = pd.DataFrame(painel_jogos)
