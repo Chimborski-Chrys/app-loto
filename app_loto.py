@@ -36,6 +36,21 @@ COLUNAS_GRID = [set(range(1 + i, 26, 5)) for i in range(5)]
 DIAG_PRINCIPAL  = {1, 7, 13, 19, 25}
 DIAG_SECUNDARIA = {5, 9, 13, 17, 21}
 
+# ── CORES OFICIAIS DAS BOLAS (cor = final do número) ───────────────────────────
+FINAIS_ORDEM = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]
+NOME_COR = {
+    1: "Vermelha", 2: "Amarela", 3: "Verde", 4: "Marrom", 5: "Azul",
+    6: "Rosa", 7: "Preta", 8: "Cinza", 9: "Laranja", 0: "Branca",
+}
+DEZENAS_POR_COR = {f: [n for n in range(1, 26) if n % 10 == f] for f in range(10)}
+# (fundo, texto) para renderização do volante
+CORES_HEX = {
+    1: ("#e53935", "#fff"), 2: ("#fdd835", "#000"), 3: ("#43a047", "#fff"),
+    4: ("#795548", "#fff"), 5: ("#1e88e5", "#fff"), 6: ("#ec407a", "#fff"),
+    7: ("#212121", "#fff"), 8: ("#9e9e9e", "#000"), 9: ("#fb8c00", "#fff"),
+    0: ("#fafafa", "#000"),
+}
+
 # ── VALIDAÇÃO ──────────────────────────────────────────────────────────────────
 def validar_soma(jogo):
     return 180 <= sum(jogo) <= 220
@@ -72,6 +87,43 @@ def validar_curva_acertos(jogo, historico_sets, janela=30):
     js = set(jogo)
     media = sum(len(js & h) for h in recentes) / len(recentes)
     return round(media) not in (8, 9, 10)
+
+def perfil_cores(jogo):
+    """Contagem de dezenas por cor (final do número)."""
+    cnt = Counter(n % 10 for n in jogo)
+    return {f: cnt.get(f, 0) for f in FINAIS_ORDEM}
+
+def validar_cores(jogo):
+    """Faixas dominantes do histórico (3729 concursos analisados):
+    - cores de 3 dezenas (finais 1-5) saem 1 a 3 vezes em ~95% dos concursos;
+    - no máximo 2 cores zeradas (97,4% do histórico);
+    - entre 4 e 6 cores com 2+ dezenas (96% do histórico)."""
+    p = perfil_cores(jogo)
+    zeradas  = sum(1 for f in FINAIS_ORDEM if p[f] == 0)
+    duasmais = sum(1 for f in FINAIS_ORDEM if p[f] >= 2)
+    for f in (1, 2, 3, 4, 5):
+        if not 1 <= p[f] <= 3:
+            return False
+    return zeradas <= 2 and 4 <= duasmais <= 6
+
+def validar_assinatura_cores(assin):
+    """Mesmas faixas de validar_cores, aplicadas direto à assinatura
+    (tupla de contagens na ordem FINAIS_ORDEM)."""
+    zeradas  = sum(1 for c in assin if c == 0)
+    duasmais = sum(1 for c in assin if c >= 2)
+    if any(not 1 <= assin[i] <= 3 for i in range(5)):  # finais 1-5
+        return False
+    return zeradas <= 2 and 4 <= duasmais <= 6
+
+def assinaturas_cores(historico_sets):
+    """Assinaturas de cores do histórico dentro do perfil dominante
+    (com repetições — amostrar daqui equivale a amostrar da
+    distribuição empírica condicionada ao padrão)."""
+    todas = (
+        tuple(sum(1 for n in s if n % 10 == f) for f in FINAIS_ORDEM)
+        for s in historico_sets
+    )
+    return [a for a in todas if validar_assinatura_cores(a)]
 
 # ── FUNÇÕES AUXILIARES ─────────────────────────────────────────────────────────
 def calcular_frequencia(historico_sets):
@@ -284,6 +336,41 @@ def gerar_ciclo3(historico_sets, pool=None):
             return j
     return _fallback(historico_sets, pool=p)
 
+def gerar_padrao_cores(historico_sets, pool=None):
+    """Estratégia de Cores: amostra uma assinatura de cores real do histórico
+    (distribuição empírica) e monta o jogo respeitando essa assinatura.
+    Fallback: geração aleatória filtrada por validar_cores."""
+    p = pool if pool is not None else TODAS
+    assinaturas = assinaturas_cores(historico_sets) if historico_sets else []
+
+    if assinaturas:
+        for _ in range(1000):
+            assin = random.choice(assinaturas)
+            dez = set()
+            ok = True
+            for f, qtd in zip(FINAIS_ORDEM, assin):
+                disponiveis = [n for n in DEZENAS_POR_COR[f] if n in p]
+                if len(disponiveis) < qtd:
+                    ok = False
+                    break
+                dez.update(random.sample(disponiveis, qtd))
+            if not ok or len(dez) != 15:
+                continue
+            j = sorted(dez)
+            if validar_jogo_loto(j, historico_sets):
+                return j
+
+    # Fallback: sem histórico (ou pool restrito demais) — filtro de faixas
+    p_list = sorted(p)
+    if len(p_list) < 15:
+        return p_list
+    for _ in range(1000):
+        j = sorted(random.sample(p_list, 15))
+        if validar_cores(j) and validar_soma(j) and validar_sequencia(j) \
+                and validar_ineditismo(j, historico_sets):
+            return j
+    return _fallback(historico_sets, pool=p)
+
 # (fechamentos heurísticos antigos substituídos por gerar_fechamento_garantido)
 
 # ── ANTI-POPULARIDADE ──────────────────────────────────────────────────────────
@@ -393,6 +480,8 @@ def gerar_estrategia_loto(tipo, frequencia, historico_sets, ultimo, fixas=None, 
         return gerar_ciclo3(historico_sets, pool=p)
     elif tipo == "Anti-Popular":
         return gerar_anti_popular(historico_sets, pool=p)
+    elif tipo == "Padrão de Cores":
+        return gerar_padrao_cores(historico_sets, pool=p)
     return _fallback(historico_sets, pool=p)
 
 # ── JOGO MÚLTIPLO ───────────────────────────────────────────────────────────────
@@ -403,6 +492,7 @@ ESTRATEGIAS_MULTIPLO = [
     "Equilíbrio IA 2026",
     "Ranking Frequência",
     "Rastreio Ciclo 3",
+    "Padrão de Cores",
 ]
 
 CORES_ESTRATEGIA = {
@@ -412,12 +502,13 @@ CORES_ESTRATEGIA = {
     "Equilíbrio IA 2026":   "FFF3D6",
     "Ranking Frequência":   "EAD6FF",
     "Rastreio Ciclo 3":     "D6FFF6",
+    "Padrão de Cores":      "FFE3C9",
 }
 
 def gerar_jogo_multiplo(qtd_por_estrategia, frequencia, historico_sets, ultimo, pool=None):
     """Gera `qtd_por_estrategia` jogos de CADA uma das 6 estratégias principais,
     em blocos agrupados (todos os jogos de uma estratégia antes de passar para a
-    próxima — sem intercalar). Total de jogos = qtd_por_estrategia * 6.
+    próxima — sem intercalar). Total de jogos = qtd_por_estrategia * 7.
     Cada jogo é validado contra o histórico + os jogos já gerados neste lote
     (evita repetir a mesma combinação dentro do próprio múltiplo)."""
     jogos = []
@@ -468,6 +559,7 @@ def gerar_melhor_jogo_loto(frequencia, historico_sets, ultimo, pool=None):
         "Equilíbrio IA 2026",
         "Ranking Frequência",
         "Rastreio Ciclo 3",
+        "Padrão de Cores",
     ]
     candidatos = []
     for tipo in candidatos_est:
@@ -533,11 +625,16 @@ def simular_ate_acertar(resultado_alvo, min_acertos, frequencia, pool,
 
 # ── RENDER ─────────────────────────────────────────────────────────────────────
 def render_volante(jogo):
+    """Dezenas selecionadas pintadas com a cor oficial da bola (final do número)."""
     jogo_set = set(jogo)
     html = '<div class="volante">'
     for n in range(1, 26):
-        cls = "dezena selecionada" if n in jogo_set else "dezena"
-        html += f'<div class="{cls}">{n:02d}</div>'
+        if n in jogo_set:
+            bg, fg = CORES_HEX[n % 10]
+            html += (f'<div class="dezena" style="background-color:{bg};'
+                     f'color:{fg};border:none;font-weight:bold;">{n:02d}</div>')
+        else:
+            html += f'<div class="dezena">{n:02d}</div>'
     html += '</div>'
     return html
 
@@ -546,7 +643,12 @@ def info_jogo(jogo):
     impares = 15 - pares
     soma    = sum(jogo)
     n_mold  = len(set(jogo) & MOLDURA)
-    return f"Soma: {soma} | Par/Ímpar: {pares}/{impares} | Moldura: {n_mold}/16"
+    p = perfil_cores(jogo)
+    zeradas  = sum(1 for f in FINAIS_ORDEM if p[f] == 0)
+    duasmais = sum(1 for f in FINAIS_ORDEM if p[f] >= 2)
+    padrao_ok = "✔" if validar_cores(jogo) else "✖"
+    return (f"Soma: {soma} | Par/Ímpar: {pares}/{impares} | Moldura: {n_mold}/16 | "
+            f"Cores 2+: {duasmais} · Zeradas: {zeradas} · Padrão {padrao_ok}")
 
 # ── INTERFACE ──────────────────────────────────────────────────────────────────
 st.title("🎯 Lotofácil Pro — Engenharia de Dados & IA")
@@ -617,7 +719,7 @@ pool_disponivel = (TODAS - set(excluir_nums)) if excluir_nums else None
 
 qtd_jogos = st.sidebar.slider(
     "Quantidade de jogos", min_value=1, max_value=50, value=5,
-    help="Em 'Jogo Múltiplo (6 Estratégias)' este valor é por estratégia (total = valor × 6)."
+    help="Em 'Jogo Múltiplo (7 Estratégias)' este valor é por estratégia (total = valor × 7)."
 )
 
 # ── Sidebar 3: Estratégia ─────────────────────────────────────────────────────
@@ -627,7 +729,7 @@ st.sidebar.header("3. Escolher Estratégia")
 estrategia = st.sidebar.selectbox("Estratégia", [
     "Anti-Popular (Recomendado)",
     "Melhor Jogo (IA)",
-    "Jogo Múltiplo (6 Estratégias)",
+    "Jogo Múltiplo (7 Estratégias)",
     "Inversão Suprema",
     "Cercamento 7/8",
     "Fixas de Ouro",
@@ -636,6 +738,7 @@ estrategia = st.sidebar.selectbox("Estratégia", [
     "Fechamento de Dezenas",
     "Fechamento Garantido (Cobertura)",
     "Rastreio Ciclo 3",
+    "Padrão de Cores",
 ])
 
 fixas = []
@@ -711,6 +814,7 @@ _opcoes_sim = [
     "Equilíbrio IA 2026",
     "Ranking Frequência",
     "Rastreio Ciclo 3",
+    "Padrão de Cores",
 ]
 estrategia_sim_sel = st.sidebar.selectbox(
     "Estratégia da simulação:", _opcoes_sim,
@@ -725,7 +829,7 @@ if btn_gerar:
 
     estrategia_exec = "Anti-Popular" if estrategia.startswith("Anti-Popular") else estrategia
 
-    if estrategia == "Jogo Múltiplo (6 Estratégias)":
+    if estrategia == "Jogo Múltiplo (7 Estratégias)":
         _total_multiplo = qtd_jogos * len(ESTRATEGIAS_MULTIPLO)
         st.header(f"Resultados: {estrategia} — {qtd_jogos} por estratégia ({_total_multiplo} no total)")
     else:
@@ -754,17 +858,17 @@ if btn_gerar:
                 st.write(f"{medal} **{nome}** — Índice: {score:.0f}")
         jogos_gerados.append(jogo_best)
 
-    elif estrategia == "Jogo Múltiplo (6 Estratégias)":
+    elif estrategia == "Jogo Múltiplo (7 Estratégias)":
         _total_multiplo = qtd_jogos * len(ESTRATEGIAS_MULTIPLO)
         if _total_multiplo > 90:
             st.warning(f"{_total_multiplo} jogos no total — geração/renderização pode demorar.")
-        with st.spinner(f"Gerando {qtd_jogos} jogo(s) de cada uma das 6 estratégias ({_total_multiplo} no total)..."):
+        with st.spinner(f"Gerando {qtd_jogos} jogo(s) de cada uma das 7 estratégias ({_total_multiplo} no total)..."):
             resultado_multiplo = gerar_jogo_multiplo(
                 qtd_jogos, frequencia, historico_sets, ultimo_resultado, pool=pool_disponivel
             )
         st.caption(
             f"Blocos agrupados (sem intercalar), {qtd_jogos} por estratégia: "
-            "Anti-Popular → Inversão Suprema → Cercamento 7/8 → Equilíbrio IA 2026 → Ranking Frequência → Rastreio Ciclo 3"
+            "Anti-Popular → Inversão Suprema → Cercamento 7/8 → Equilíbrio IA 2026 → Ranking Frequência → Rastreio Ciclo 3 → Padrão de Cores"
         )
         _tipo_atual = None
         cols = st.columns(3)
@@ -874,6 +978,7 @@ elif btn_painel:
         ("Ranking Frequência",    [],         ""),
         ("Fechamento de Dezenas", pool_auto,  f"Pool auto: {len(pool_auto)} dezenas"),
         ("Rastreio Ciclo 3",      [],         ""),
+        ("Padrão de Cores",       [],         "Assinatura de cores do histórico"),
     ]
 
     painel_jogos = []
@@ -1031,6 +1136,36 @@ else:
         else:
             c4.metric("Status", "Normal")
 
+        with st.expander("🎨 Análise de Cores das Bolas (final do número)"):
+            st.caption(
+                "Cor da bola é definida pelo final do número: "
+                "1=Vermelha · 2=Amarela · 3=Verde · 4=Marrom · 5=Azul · "
+                "6=Rosa · 7=Preta · 8=Cinza · 9=Laranja · 0=Branca"
+            )
+            n_hist = len(historico_sets)
+            linhas_cores = []
+            for f in FINAIS_ORDEM:
+                grupo = DEZENAS_POR_COR[f]
+                cnts = [sum(1 for n in s if n % 10 == f) for s in historico_sets]
+                media = sum(cnts) / n_hist
+                dist = Counter(cnts)
+                linhas_cores.append({
+                    "Cor": NOME_COR[f],
+                    "Dezenas": " ".join(f"{n:02d}" for n in grupo),
+                    "Média/concurso": round(media, 2),
+                    "Esperado": round(len(grupo) * 15 / 25, 2),
+                    "% zerada": f"{100 * dist.get(0, 0) / n_hist:.1f}%",
+                    "% completa": f"{100 * dist.get(len(grupo), 0) / n_hist:.1f}%",
+                })
+            st.dataframe(pd.DataFrame(linhas_cores), use_container_width=True, hide_index=True)
+            pct_padrao = 100 * sum(1 for s in historico_sets if validar_cores(s)) / n_hist
+            st.caption(
+                f"**Padrão dominante**: finais 1–5 com 1–3 dezenas, no máximo 2 cores zeradas "
+                f"e 4–6 cores com 2+ dezenas → cobre **{pct_padrao:.1f}%** do histórico. "
+                "A estratégia **Padrão de Cores** gera jogos dentro desse perfil "
+                "(amostrando assinaturas reais do histórico)."
+            )
+
     elif "_sim_media_val" not in st.session_state:
         st.markdown("""
         ### Como usar
@@ -1046,6 +1181,13 @@ else:
         | Soma | Entre 180 e 220 |
         | Sequência | No máximo 4 números consecutivos |
         | Ineditismo | Sem 14+ dezenas em comum com qualquer resultado histórico |
+
+        ### Estratégia Padrão de Cores 🎨
+        Cor da bola = final do número (1=Vermelha, 2=Amarela, 3=Verde, 4=Marrom,
+        5=Azul, 6=Rosa, 7=Preta, 8=Cinza, 9=Laranja, 0=Branca).
+        A estratégia amostra assinaturas de cores reais do histórico e monta jogos
+        dentro do perfil dominante: finais 1–5 com 1–3 dezenas, no máximo 2 cores
+        zeradas e 4–6 cores com 2+ dezenas.
         """)
 
 # ── JOGO DA MÉDIA ──────────────────────────────────────────────────────────────
