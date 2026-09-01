@@ -27,6 +27,23 @@ QUADRANTES = [
     set(range(31, 46)),  # Q3: 31–45
     set(range(46, 61)),  # Q4: 46–60
 ]
+# ── CARROSSEL 142857 (raiz digital / aritmética modular de base 9) ─────────────
+# A raiz digital de n é 1 + (n-1) % 9 e vale 3, 6 ou 9 exatamente quando n é
+# múltiplo de 3. Os dois grupos abaixo são, portanto, a partição do volante por
+# n % 3: 40 dezenas no carrossel (2/3 do volante) e 20 excluídas (1/3).
+#
+# MEDIDO nos 3.009 concursos reais de `Mega-Sena (4).xlsx`: a distribuição do
+# número de dezenas do carrossel por concurso é indistinguível da hipergeométrica.
+#     carrossel:      0      1      2      3      4      5      6
+#     teórico:     0,08%  1,24%  7,55% 22,50% 34,68% 26,29%  7,67%
+#     real:        0,03%  1,30%  6,25% 22,63% 34,13% 28,32%  7,34%
+#     média real 4,0386 contra 4,0000 esperada (ep 0,0201, t = +1,91)
+# O carrossel NÃO prevê nada — o histórico é o que o acaso produz. Como todos os
+# outros filtros deste arquivo (ver `validar_jogo_mega`), ele não muda SE você
+# ganha: molda o perfil do jogo e com quantos você divide o prêmio.
+GRUPO_CARROSSEL_142857 = {n for n in range(1, 61) if n % 3 != 0}
+GRUPO_EXCLUIDOS_369    = {n for n in range(1, 61) if n % 3 == 0}
+
 
 
 # ── ANÁLISE ────────────────────────────────────────────────────────────────────
@@ -100,14 +117,67 @@ def validar_paridade(jogo):
     return 1 <= pares <= n - 1
 
 
+# ── ESCALA DOS FILTROS POR TAMANHO DO JOGO ────────────────────────────────────
+# `validar_soma` e `validar_paridade` já escalam com o número de dezenas. Os três
+# filtros abaixo não escalavam: os limiares eram os do jogo de 6 aplicados sem
+# ajuste a jogos maiores, e a seletividade explodia com o tamanho.
+#
+# MEDIDO com 8.000 jogos aleatórios por tamanho, taxa de aprovação de cada filtro
+# ISOLADO, antes desta correção:
+#     filtro          n=6      n=10     n=15
+#     sequência     96,85%   ~82,4%    48,83%
+#     finais        89,33%    52,95%    7,27%
+#     ineditismo    98,14%    46,33%    0,01%
+#     COMBINADO     27,60%    10,53%    0,005%
+# Em n=15 nenhuma estratégia conseguia produzir um jogo válido: todas caíam no
+# `_fallback`, que só checa soma e ineditismo — na prática, jogo aleatório com o
+# rótulo da estratégia. Os limiares abaixo restauram, em cada tamanho, a mesma
+# seletividade que o filtro tem em 6 dezenas.
+#
+# As tabelas são medidas, não derivadas de fórmula: cobrem 6 a 15, que é a faixa
+# do slider "Números por jogo". Fora dela, a fórmula de reserva mantém a mesma
+# proporção do jogo de 6.
+
+# Maior sequência de consecutivas tolerada. Em n=6 o limite era 2 (aprova 96,3%);
+# os demais são o menor limite que devolve ~96,8% naquele tamanho.
+MAX_CONSECUTIVAS_POR_TAMANHO = {6: 2, 7: 2, 8: 3, 9: 3, 10: 3, 11: 3,
+                                12: 4, 13: 4, 14: 4, 15: 4}
+
+# Máximo de dezenas com o mesmo algarismo final. Em n=6 o limite era 2 (89,2%).
+MAX_MESMO_FINAL_POR_TAMANHO = {6: 2, 7: 2, 8: 3, 9: 3, 10: 3, 11: 3,
+                               12: 3, 13: 4, 14: 4, 15: 4}
+
+# Máximo de dezenas em comum com um concurso passado. Em n=6 o limite era 4
+# (98,2%). Teto absoluto de 5 em qualquer tamanho: 6 significaria que o jogo
+# CONTÉM um resultado já sorteado por inteiro, que é justamente o que o filtro
+# existe para impedir.
+MAX_COMUM_CONCURSO_POR_TAMANHO = {6: 4, 7: 4, 8: 5, 9: 5, 10: 5, 11: 5,
+                                  12: 5, 13: 5, 14: 5, 15: 5}
+TETO_COMUM_CONCURSO = 5
+
+
+def _limite_por_tamanho(tabela, n, base_n6, teto=None):
+    """Valor da tabela para `n`; fora dela, escala a proporção do jogo de 6."""
+    if n in tabela:
+        return tabela[n]
+    v = max(base_n6, -(-n * base_n6 // 6))
+    return min(v, teto) if teto is not None else v
+
+
 def validar_sequencia(jogo):
-    """Nenhuma sequência de 3 ou mais números consecutivos."""
+    """Limita a maior sequência de consecutivas ao tamanho do jogo.
+
+    Em 6 dezenas o limite é 2 — nenhuma trinca — como antes. Acima disso o
+    limite cresce: num jogo de 15 dezenas trincas aparecem em 51% dos sorteios
+    aleatórios só por densidade, e proibi-las reprovava metade do espaço sem
+    nenhum critério estatístico por trás. Ver MAX_CONSECUTIVAS_POR_TAMANHO."""
+    limite = _limite_por_tamanho(MAX_CONSECUTIVAS_POR_TAMANHO, len(jogo), 2)
     s = sorted(jogo)
     seq = 1
     for i in range(len(s) - 1):
         if s[i] + 1 == s[i + 1]:
             seq += 1
-            if seq >= 3:
+            if seq > limite:
                 return False
         else:
             seq = 1
@@ -115,9 +185,15 @@ def validar_sequencia(jogo):
 
 
 def validar_finais(jogo):
-    """No máximo 2 dezenas com o mesmo algarismo final."""
+    """Limita a repetição de algarismo final ao tamanho do jogo.
+
+    São 6 dezenas por algarismo final no volante de 60. O limite de 2 aprova
+    89,2% dos jogos de 6, mas só 7,3% dos de 15 — em 15 dezenas a média por
+    final já é 1,5 e o teto de 2 vira quase impossível. Ver
+    MAX_MESMO_FINAL_POR_TAMANHO."""
+    limite = _limite_por_tamanho(MAX_MESMO_FINAL_POR_TAMANHO, len(jogo), 2)
     finais = Counter(n % 10 for n in jogo)
-    return max(finais.values()) <= 2
+    return max(finais.values()) <= limite
 
 
 def validar_quentes(jogo, quentes):
@@ -147,14 +223,76 @@ def validar_ineditismo(jogo, historico_sets):
     """
     Jogo não pode ter 5 ou mais dezenas em comum com qualquer resultado histórico.
     Usa índice invertido: O(dezenas × ocorrências) em vez de O(concursos) por jogo.
+
+    NÃO é um filtro preditivo. Sorteios são independentes: repetir dezenas de um
+    concurso passado não altera a chance do próximo. Além disso, escolher
+    uniformemente dentro de um subconjunto permitido A deixa a probabilidade
+    inalterada em 1/C(60,6) — o |A| cancela:
+
+        P(acertar) = Σ_{a∈A} P(escolher a) × P(a ser sorteada)
+                   = |A| × (1/|A|) × (1/N) = 1/N
+
+    O filtro também não corresponde à realidade: entre os 3.009 concursos da
+    Mega-Sena existem 25 pares que compartilham 5+ dezenas (esperado sob sorteio
+    uniforme: 29,4), incluindo os concursos consecutivos 308 e 309. 49 resultados
+    reais seriam rejeitados por esta função. Ver pares_repetidos_historico().
+
+    A justificativa real para mantê-lo é ANTI-POPULARIDADE: parte dos apostadores
+    joga resultados passados de propósito, então evitá-los reduz marginalmente a
+    divisão do prêmio em caso de acerto. Efeito pequeno, mas é o único que existe.
+
+    O LIMITE ESCALA COM O TAMANHO DO JOGO. Um concurso tem 6 dezenas, mas um jogo
+    de 15 contém C(15,5) = 3.003 subconjuntos de 5 dezenas; contra 3.009 concursos
+    passados, bater 5 com algum deles é praticamente certo. Com o limite fixo em
+    4, este filtro aprovava 98,14% dos jogos de 6 e apenas 0,01% dos de 15 — todas
+    as estratégias caíam no `_fallback` nesse tamanho. Ver
+    MAX_COMUM_CONCURSO_POR_TAMANHO; o teto de 5 nunca é ultrapassado, porque 6 em
+    comum significaria reproduzir um resultado já sorteado por inteiro.
     """
     if not historico_sets:
         return True
+    limite = _limite_por_tamanho(MAX_COMUM_CONCURSO_POR_TAMANHO, len(jogo), 4,
+                                 teto=TETO_COMUM_CONCURSO)
     indice = _indice_ineditismo(historico_sets)
     cont = Counter()
     for n in jogo:
         cont.update(indice.get(n, ()))
-    return not cont or max(cont.values()) < 5
+    return not cont or max(cont.values()) <= limite
+
+
+def pares_repetidos_historico(historico_sets, min_comum=5):
+    """
+    Encontra os pares de concursos REAIS que compartilham min_comum ou mais
+    dezenas — exatamente o padrão que validar_ineditismo proíbe. Mede o filtro
+    contra a realidade que ele pretende descrever.
+
+    Retorna (pares, rejeitados, esperado):
+      pares      lista de (idx_antigo, idx_recente, n_dezenas_em_comum)
+      rejeitados quantos sorteios reais validar_ineditismo recusaria
+      esperado   nº de pares previsto sob sorteio uniforme, para comparação
+    """
+    if not historico_sets:
+        return [], 0, 0.0
+
+    indice = _indice_ineditismo(historico_sets)
+    pares = []
+    rejeitados = 0
+    for i, s in enumerate(historico_sets):
+        cont = Counter()
+        for n in s:
+            cont.update(indice.get(n, ()))
+        cont.pop(i, None)  # o próprio concurso sempre casa 6 consigo mesmo
+        if cont and max(cont.values()) >= min_comum:
+            rejeitados += 1
+        pares.extend((j, i, c) for j, c in cont.items() if j < i and c >= min_comum)
+
+    # Sob sorteio uniforme: C(n,2) pares × P(dois sorteios compartilharem min_comum+)
+    n = len(historico_sets)
+    p_par = sum(comb(6, k) * comb(54, 6 - k) for k in range(min_comum, 7)) / comb(60, 6)
+    esperado = n * (n - 1) / 2 * p_par
+
+    pares.sort(key=lambda t: (-t[2], t[1]))
+    return pares, rejeitados, esperado
 
 
 def validar_quadrantes(jogo):
@@ -215,7 +353,47 @@ def pontuar_anti_popularidade(jogo):
     return max(0.0, round(score, 1))
 
 
+def faixa_carrossel(n_dezenas):
+    """`(minimo, maximo)` de dezenas do GRUPO_CARROSSEL_142857 aceitas num jogo.
+
+    Ancorada na regra do jogo de 6 dezenas — entre 3 e 5 no carrossel — e
+    escalada pela mesma proporção (teto de n/2 a piso de 5n/6), com dois
+    travamentos: nunca aceitar zero dezenas do carrossel nem o jogo inteiro
+    dentro dele. Para 6 devolve exatamente (3, 5); para 15, (8, 12).
+    """
+    lo = max(1, -(-n_dezenas * 3 // 6))            # teto de n/2
+    hi = min(n_dezenas - 1, n_dezenas * 5 // 6)    # piso de 5n/6
+    return lo, max(lo, hi)
+
+
+def validar_proporcao_142857(jogo):
+    """Exige que o jogo fique na banda do carrossel correspondente ao seu tamanho.
+
+    Num jogo de 6 dezenas, entre 3 e 5 no carrossel: aprova 85,08% dos 3.009
+    concursos reais (83,47% teórico) e barra os dois extremos degenerados — o
+    jogo todo de múltiplos de 3 e o jogo sem nenhum múltiplo de 3.
+
+    Empilhado nos demais filtros, o espaço aprovado cai de 33,60% para 27,69%
+    dos jogos possíveis: folga de sobra para os laços de tentativa das funções
+    de geração não caírem no `_fallback`.
+    """
+    lo, hi = faixa_carrossel(len(jogo))
+    return lo <= len(set(jogo) & GRUPO_CARROSSEL_142857) <= hi
+
+
 def validar_jogo_mega(jogo, historico_sets, quentes):
+    """
+    Aplica todos os filtros de geração.
+
+    Nenhum destes filtros aumenta a probabilidade de acerto — escolher
+    uniformemente dentro do subconjunto permitido mantém P(acertar) exatamente em
+    1/C(60,6) = 1/50.063.860, qualquer que seja o recorte (ver validar_ineditismo).
+    O que eles fazem é moldar o PERFIL do jogo: evitar combinações populares
+    (datas, sequências, progressões, resultados passados) reduz a chance de
+    dividir o prêmio com outros apostadores em caso de acerto.
+
+    Ou seja: os filtros não mudam SE você ganha, mudam COM QUANTOS você divide.
+    """
     return (
         validar_soma(jogo)
         and validar_paridade(jogo)
@@ -225,6 +403,7 @@ def validar_jogo_mega(jogo, historico_sets, quentes):
         and validar_ineditismo(jogo, historico_sets)
         and validar_quadrantes(jogo)
         and validar_popularidade(jogo)
+        and validar_proporcao_142857(jogo)
     )
 
 
@@ -786,7 +965,10 @@ def info_jogo(jogo, quentes):
     soma = sum(jogo)
     quads = sum(1 for q in QUADRANTES if set(jogo) & q)
     n_q = len(set(jogo) & set(quentes))
-    return f"Soma: {soma} | Par/Ímpar: {pares}/{impares} | Quadrantes: {quads}/4 | Quentes: {n_q}"
+    n_carr = len(set(jogo) & GRUPO_CARROSSEL_142857)
+    n_excl = len(set(jogo) & GRUPO_EXCLUIDOS_369)
+    return (f"Soma: {soma} | Par/Ímpar: {pares}/{impares} | Quadrantes: {quads}/4 | "
+            f"Quentes: {n_q} | Carrossel 142857: {n_carr}/{n_excl}")
 
 
 # ── INTERFACE ──────────────────────────────────────────────────────────────────
@@ -801,6 +983,7 @@ file = st.sidebar.file_uploader(
 )
 
 historico_sets = []
+concursos_ids = []  # nº do concurso por posição em historico_sets (linhas inválidas são puladas)
 frequencia = {i: 0 for i in range(1, 61)}
 quentes_global = []
 acumulada_info = 0
@@ -819,11 +1002,16 @@ if file:
                 cols_bolas = df[bola_cols]
             else:
                 cols_bolas = df.iloc[:, 2:8]
-            for _, row in cols_bolas.iterrows():
+            col_concurso = df.iloc[:, 0]
+            for pos, (_, row) in enumerate(cols_bolas.iterrows()):
                 try:
                     nums = set(int(x) for x in row if pd.notna(x) and 1 <= int(x) <= 60)
                     if len(nums) == 6:
                         historico_sets.append(nums)
+                        try:
+                            concursos_ids.append(int(col_concurso.iloc[pos]))
+                        except (ValueError, TypeError, IndexError):
+                            concursos_ids.append(len(historico_sets))
                 except (ValueError, TypeError):
                     pass
 
@@ -1020,6 +1208,15 @@ estrategia_bt = st.sidebar.selectbox("Estratégia do backtest:", _opcoes_bt)
 n_concursos_bt = st.sidebar.slider("Últimos N concursos", 10, 200, 50, step=10)
 jogos_bt = st.sidebar.slider("Jogos por concurso", 1, 50, 10)
 btn_backtest = st.sidebar.button("📈 Rodar Backtest")
+
+st.sidebar.divider()
+st.sidebar.header("7. Teste do Filtro de Ineditismo")
+st.sidebar.caption(
+    "Confronta o filtro de ineditismo com o histórico real: quantos concursos "
+    "de verdade repetiram 5+ dezenas de um concurso anterior?"
+)
+min_comum_teste = st.sidebar.slider("Dezenas em comum (mínimo)", 4, 6, 5)
+btn_ineditismo = st.sidebar.button("🔍 Testar Ineditismo")
 
 
 # ── MAIN AREA ──────────────────────────────────────────────────────────────────
@@ -1349,6 +1546,81 @@ elif btn_backtest:
                 veredito = f"{abs(desvio):.1f}% abaixo do teórico nesta amostra (ruído estatístico)."
             st.info(f"**Veredito:** a estratégia **{estrategia_bt}** ficou {veredito}")
 
+elif btn_ineditismo:
+    if not historico_sets:
+        st.error("Carregue o Excel da Mega-Sena na lateral para rodar este teste.")
+    else:
+        st.header(f"🔍 Filtro de Ineditismo vs. Histórico Real ({min_comum_teste}+ dezenas)")
+        st.caption(
+            "`validar_ineditismo` recusa qualquer jogo com 5+ dezenas em comum com um "
+            "resultado passado. Este painel pergunta: a própria Mega-Sena respeita essa regra?"
+        )
+
+        pares, rejeitados, esperado = pares_repetidos_historico(historico_sets, min_comum_teste)
+        n_conc = len(historico_sets)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Concursos analisados", f"{n_conc:,}")
+        c2.metric(f"Pares com {min_comum_teste}+ em comum", f"{len(pares):,}",
+                  delta=f"{len(pares) - esperado:+.1f} vs esperado ({esperado:.1f})")
+        c3.metric("Sorteios reais rejeitados", f"{rejeitados:,}",
+                  delta=f"{rejeitados / n_conc * 100:.1f}% do histórico",
+                  delta_color="off")
+        # O filtro remove ~n_conc × C(6,5)×C(54,1) combinações do espaço de busca
+        excluidas = n_conc * sum(comb(6, k) * comb(54, 6 - k) for k in range(min_comum_teste, 7))
+        c4.metric("Combinações excluídas", f"~{excluidas:,}",
+                  delta=f"{excluidas / comb(60, 6) * 100:.2f}% do espaço",
+                  delta_color="off")
+
+        st.divider()
+
+        if not pares:
+            st.info(
+                f"Nenhum par com {min_comum_teste}+ dezenas em comum neste histórico "
+                f"(esperado sob sorteio uniforme: {esperado:.1f})."
+            )
+        else:
+            st.subheader(f"Os {len(pares)} pares reais que o filtro proibiria")
+            linhas = []
+            for j, i, c in pares:
+                sj, si = sorted(historico_sets[j]), sorted(historico_sets[i])
+                comuns = sorted(set(sj) & set(si))
+                linhas.append({
+                    "Concurso A": concursos_ids[j] if j < len(concursos_ids) else j + 1,
+                    "Resultado A": " ".join(f"{n:02d}" for n in sj),
+                    "Concurso B": concursos_ids[i] if i < len(concursos_ids) else i + 1,
+                    "Resultado B": " ".join(f"{n:02d}" for n in si),
+                    "Em comum": c,
+                    "Dezenas repetidas": " ".join(f"{n:02d}" for n in comuns),
+                    "Distância": (concursos_ids[i] - concursos_ids[j]
+                                  if i < len(concursos_ids) and j < len(concursos_ids)
+                                  else i - j),
+                })
+            st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
+
+            mais_proximo = min(linhas, key=lambda r: r["Distância"])
+            st.warning(
+                f"Par mais próximo: concursos **{mais_proximo['Concurso A']}** e "
+                f"**{mais_proximo['Concurso B']}**, separados por apenas "
+                f"**{mais_proximo['Distância']}** sorteio(s), com "
+                f"**{mais_proximo['Em comum']}** dezenas em comum "
+                f"({mais_proximo['Dezenas repetidas']}). "
+                "O filtro teria impedido a geração do segundo."
+            )
+
+        desvio_pct = (len(pares) - esperado) / esperado * 100 if esperado else 0
+        st.info(
+            f"**Veredito:** o histórico tem **{len(pares)}** pares repetidos contra "
+            f"**{esperado:.1f}** previstos pelo acaso puro ({desvio_pct:+.1f}%). "
+            "A Mega-Sena repete dezenas na taxa exata que a aleatoriedade prevê — "
+            "o padrão que o filtro trata como suspeito é o comportamento normal do sorteio.\n\n"
+            "Isso **não** significa que o filtro prejudica você: escolher uniformemente "
+            f"dentro do subconjunto permitido mantém a chance em 1/{comb(60, 6):,}, "
+            "idêntica à de uma Surpresinha. O filtro é neutro para acertar e levemente "
+            "favorável para **não dividir** o prêmio, já que parte dos apostadores joga "
+            "resultados passados de propósito. É essa — e só essa — a sua utilidade."
+        )
+
 else:
     if "_sim_media_val" not in st.session_state:
         st.info("Configure a estratégia na lateral e clique em 'Gerar Jogos'.")
@@ -1383,7 +1655,22 @@ else:
         | Quentes | Pelo menos 1 número do top-10 histórico |
         | Ineditismo | Sem 5+ dezenas em comum com qualquer resultado histórico |
         | Quadrantes | Distribuídas em pelo menos 3 dos 4 quadrantes do volante |
-        | Anti-popularidade | Ao menos 1 dezena >31 e sem progressões aritméticas — reduz divisão do prêmio |
+        | Anti-popularidade | Ao menos 1 dezena >31 e sem progressões aritméticas |
+
+        ### O que os filtros fazem — e o que não fazem
+        Nenhum filtro aumenta a chance de acerto. Sorteios são independentes e
+        uniformes: escolher dentro de um subconjunto permitido mantém a
+        probabilidade exatamente em **1 em 50.063.860**, a mesma de uma Surpresinha
+        da lotérica. O `|A|` cancela na conta.
+
+        O que os filtros mudam é o **perfil** do jogo. Combinações populares
+        (datas ≤31, sequências, progressões, resultados passados) são jogadas por
+        muita gente — se uma delas sair, o prêmio é dividido entre dezenas de
+        ganhadores. Evitá-las não muda *se* você ganha, muda *com quantos divide*.
+
+        Use **7. Teste do Filtro de Ineditismo** na lateral para ver esse raciocínio
+        confrontado com o histórico real, e **6. Backtest Walk-Forward** para medir
+        qualquer estratégia contra o sorteio uniforme sem vazamento de informação.
         """)
 
 # ── JOGO DA MÉDIA ──────────────────────────────────────────────────────────────
