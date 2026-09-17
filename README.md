@@ -21,7 +21,8 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 
-streamlit run app.py
+
+
 ```
 
 Acesse `http://localhost:8501`. O menu lateral exibe os módulos disponíveis (Lotofácil, Mega Sena, Quina e Verificador).

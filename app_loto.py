@@ -994,6 +994,7 @@ ROTULO_ROTATIVO = "Minha Estratégia (cercamento rotativo)"
 # Definido aqui, e não junto de `gerar_super_estrategia`, porque
 # `ESTRATEGIAS_SEM_ROTATIVO` logo abaixo precisa dele no momento do import.
 ROTULO_SUPER    = "SuperEstratégia (todas as regras)"
+ROTULO_SIMPLES  = "Estratégia Simples (repetir 9)"
 
 # Estratégias incompatíveis com a rotação:
 #  - Fechamento Garantido devolve um conjunto fechado por set cover: trocar
@@ -1013,7 +1014,7 @@ ROTULO_SUPER    = "SuperEstratégia (todas as regras)"
 # definição.
 ESTRATEGIAS_SEM_ROTATIVO = {"Fechamento Garantido (Cobertura)",
                             "Errar 10", "Espelho do Errar 10",
-                            ROTULO_SUPER}
+                            ROTULO_SUPER, ROTULO_SIMPLES}
 
 ROTULO_MELHOR = "Melhor Jogo (IA)"
 
@@ -1225,6 +1226,70 @@ def gerar_carteira_rotativa(tipo, qtd, frequencia, historico_sets, ultimo, tam=1
         jogos.append(novo)
     return jogos, diag
 
+# ── ESTRATÉGIA SIMPLES (repetir 9 do último concurso + cercamento rotativo) ────
+# Só três regras, nada mais — sem soma, sequência, carrossel, cores ou pesos:
+#   1. cada jogo tem exatamente `repetidas` dezenas do último concurso e o resto
+#      entre as ausentes, escolhidas uniformemente;
+#   2. rotação da Minha Estratégia: o jogo seguinte fixa as dezenas que o
+#      anterior deixou de fora e escolhe as livres dentro dele. Com cartão de 15
+#      as duas regras sempre cabem juntas: o complemento do jogo anterior traz 6
+#      repetidas e 4 ausentes, e as 5 livres completam com 3 + 2;
+#   3. no máximo `max_iguais` dezenas em comum entre QUALQUER par do lote, e
+#      ineditismo contra o histórico (`validar_ineditismo`: até 13 em comum com
+#      um concurso é permitido).
+# A rotação trava de vez em quando: o jogo N+2 já nasce com 10 dezenas do jogo N,
+# então as livres têm de fugir dele, e a restrição acumula. Aí reancora num jogo
+# novo da regra 1. Medido com 50 jogos pedidos, 6 seeds: 50/50 em todas, com 4 a
+# 8 reâncoras, todos os pares <= 10 e todos os jogos com 9 repetidas.
+def gerar_estrategia_simples(qtd, historico_sets, ultimo, pool=None, repetidas=9,
+                             max_iguais=10, tentativas=20000):
+    """Devolve `(jogos, diag)`. `diag["reancoras"]` conta os reinícios da rotação."""
+    p = set(pool if pool is not None else TODAS)
+    ult = set(ultimo or [])
+    rep_pool = sorted(p & ult)
+    aus_pool = sorted(p - ult)
+    jogos = []
+    diag = {"reancoras": 0}
+    if len(rep_pool) < repetidas or len(aus_pool) < 15 - repetidas:
+        return jogos, diag
+
+    def cabe_no_lote(c):
+        return all(len(c & set(j)) <= max_iguais for j in jogos)
+
+    def nova_ancora():
+        for _ in range(tentativas):
+            c = set(random.sample(rep_pool, repetidas)) | set(random.sample(aus_pool, 15 - repetidas))
+            if cabe_no_lote(c) and validar_ineditismo(c, historico_sets):
+                return sorted(c)
+        return None
+
+    while len(jogos) < qtd:
+        novo = None
+        if jogos:
+            ant = set(jogos[-1])
+            fixas_rot = p - ant
+            livres = 15 - len(fixas_rot)
+            if livres > 0:
+                # C(15, 5) = 3.003 escolhas: varre todas em ordem aleatória, as
+                # checagens baratas antes do ineditismo.
+                escolhas = list(combinations(sorted(ant), livres))
+                random.shuffle(escolhas)
+                for picks in escolhas:
+                    c = fixas_rot | set(picks)
+                    if len(c & ult) != repetidas or not cabe_no_lote(c):
+                        continue
+                    if validar_ineditismo(c, historico_sets):
+                        novo = sorted(c)
+                        break
+        if novo is None:
+            novo = nova_ancora()
+            if novo is None:
+                break
+            if jogos:
+                diag["reancoras"] += 1
+        jogos.append(novo)
+    return jogos, diag
+
 # ── SUPERESTRATÉGIA (todas as regras ao mesmo tempo) ──────────────────────────
 # As estratégias do app são GERADORAS, não validadoras: cada uma tem a própria
 # receita de montar o jogo, e não existe `validar_inversao_suprema()`. Para exigir
@@ -1386,7 +1451,13 @@ CORES_ESTRATEGIA = {
 
 # Errar 10 e seu espelho ficam fora do Jogo Múltiplo e do Melhor Jogo: são
 # instrumentos de medição do modelo de ausência, não sugestões de aposta.
-ESTRATEGIAS_BACKTEST = ESTRATEGIAS_MULTIPLO + ["Errar 10", "Espelho do Errar 10"]
+# A Estratégia Simples entra no backtest como CARTEIRA: as regras dela (9
+# repetidas, rotação, teto de 10 iguais) são do lote inteiro, não de um jogo
+# isolado, então o backtest pede `jogos_por_concurso` de uma vez em vez de
+# chamar o gerador N vezes.
+ESTRATEGIAS_BACKTEST = (ESTRATEGIAS_MULTIPLO
+                        + ["Errar 10", "Espelho do Errar 10", ROTULO_SIMPLES])
+ESTRATEGIAS_CARTEIRA_BACKTEST = {ROTULO_SIMPLES}
 
 def gerar_jogo_multiplo(qtd_por_estrategia, frequencia, historico_sets, ultimo, pool=None,
                         historico_analise=None, pesos_modelo=None):
@@ -1633,6 +1704,9 @@ def backtest_walkforward(historico_sets, estrategias, janelas, n_concursos=30,
                     jogos_conc = [gerar_estrategia_loto(
                         est, freq, hist_ined, ultimo, pool=pool,
                         historico_analise=base, pesos_modelo=pesos_modelo)]
+            elif est in ESTRATEGIAS_CARTEIRA_BACKTEST:
+                jogos_conc, _ = gerar_estrategia_simples(
+                    jogos_por_concurso, hist_ined, ultimo, pool=pool)
             elif est == BASELINE_ALEATORIO:
                 jogos_conc = [sorted(random.sample(p_list, 15)) if len(p_list) >= 15
                               else p_list for _ in range(jogos_por_concurso)]
@@ -1889,6 +1963,7 @@ estrategia = st.sidebar.selectbox("Estratégia", [
     "Melhor Jogo (IA)",
     ROTULO_MULTIPLO,
     ROTULO_SUPER,
+    ROTULO_SIMPLES,
     "Modelo Ponderado",
     "Inversão Suprema",
     "Cercamento 7/8",
@@ -1907,12 +1982,17 @@ estrategia = st.sidebar.selectbox("Estratégia", [
 # o pool, não de um núcleo que se possa estender. E a garantia verificada por
 # `gerar_fechamento_garantido` é uma afirmação sobre jogos de 15 — estender cada
 # um para 16 a invalidaria sem recalcular a cobertura.
-ESTRATEGIAS_SEM_CARTAO_ESTENDIDO = {"Fechamento Garantido (Cobertura)"}
+# Estratégia Simples: a regra "9 repetidas" é definida sobre jogos de 15.
+ESTRATEGIAS_SEM_CARTAO_ESTENDIDO = {"Fechamento Garantido (Cobertura)", ROTULO_SIMPLES}
+MOTIVO_SEM_CARTAO_ESTENDIDO = {
+    "Fechamento Garantido (Cobertura)": "a garantia de cobertura só vale para jogos de 15.",
+    ROTULO_SIMPLES: "a regra de 9 repetidas do último concurso é para jogos de 15.",
+}
 tam_cartao_ef = 15 if estrategia in ESTRATEGIAS_SEM_CARTAO_ESTENDIDO else tam_cartao
 if tam_cartao > 15 and tam_cartao_ef == 15:
     st.sidebar.info(
-        f"**{estrategia}** ignora o cartão de {tam_cartao} dezenas: a garantia de "
-        "cobertura só vale para jogos de 15."
+        f"**{estrategia}** ignora o cartão de {tam_cartao} dezenas: "
+        f"{MOTIVO_SEM_CARTAO_ESTENDIDO[estrategia]}"
     )
 
 # ── Minha Estratégia: acopla o cercamento rotativo à estratégia escolhida ─────
@@ -1923,6 +2003,8 @@ MOTIVO_SEM_ROTATIVO = {
     ROTULO_SUPER:
         "já é uma estratégia de carteira: ela reveza os próprios mostradores entre "
         "os jogos. Sobrepor o cercamento rotativo brigaria com esse revezamento.",
+    ROTULO_SIMPLES:
+        "já usa o cercamento rotativo embutido.",
     ROTULO_MULTIPLO:
         "já gera blocos de várias estratégias em paralelo; rotacionar entre elas "
         "misturaria as âncoras e nenhum jogo cercaria o anterior de verdade.",
@@ -2312,6 +2394,44 @@ if btn_gerar:
                     st.caption(info_jogo(jogo))
                     st.divider()
                 jogos_gerados.append(jogo)
+
+    elif estrategia == ROTULO_SIMPLES:
+        with st.spinner(f"Gerando {qtd_jogos} jogo(s) com 9 repetidas do último concurso..."):
+            _simp, _simp_diag = gerar_estrategia_simples(
+                qtd_jogos, historico_sets, ultimo_resultado, pool=pool_disponivel,
+            )
+        st.info(
+            "**Estratégia Simples.** Cada jogo repete **9** dezenas do último concurso "
+            "e completa com 6 ausentes. Cada jogo seguinte fixa as 10 dezenas que o "
+            "anterior deixou de fora e escolhe as outras 5 dentro dele (Minha "
+            "Estratégia). Nenhum par de jogos passa de **10** dezenas em comum, e "
+            "nenhum jogo tem mais de 13 em comum com um concurso já sorteado."
+        )
+        if len(_simp) < qtd_jogos:
+            st.warning(
+                f"Gerados **{len(_simp)}** de {qtd_jogos} jogos: não sobrou combinação "
+                "que respeitasse as regras. Reduza a quantidade ou as dezenas excluídas."
+            )
+        if _simp_diag["reancoras"]:
+            st.caption(
+                f"A rotação reiniciou **{_simp_diag['reancoras']}** vez(es): nenhuma "
+                "escolha das 5 livres respeitava o limite de 10 em comum com todos os "
+                "jogos anteriores. Nesses pontos saiu um jogo novo com 9 repetidas."
+            )
+        cols = st.columns(3)
+        for i, jogo in enumerate(_simp):
+            jogos_gerados.append(jogo)
+            with cols[i % 3]:
+                st.markdown(f"**Jogo {i + 1}**")
+                _rep = len(set(jogo) & set(ultimo_resultado))
+                if i:
+                    _ov_ant = len(set(jogo) & set(_simp[i - 1]))
+                    st.caption(f"{_rep} repetidas · {_ov_ant} em comum com o jogo {i}")
+                else:
+                    st.caption(f"{_rep} repetidas · âncora")
+                st.markdown(render_volante(jogo), unsafe_allow_html=True)
+                st.caption(info_jogo(jogo))
+                st.divider()
 
     elif _super_ativa:
         with st.spinner(f"Gerando {qtd_jogos} jogo(s) que passem em todas as regras..."):
