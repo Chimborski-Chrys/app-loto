@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import random
+import re
 import time
 from itertools import combinations
 from math import comb
@@ -1222,7 +1223,8 @@ btn_ineditismo = st.sidebar.button("🔍 Testar Ineditismo")
 # ── MAIN AREA ──────────────────────────────────────────────────────────────────
 
 if btn_gerar:
-    for _k in ["_sim_media_val", "_sim_estrategia", "_sim_n_numeros", "_sim_min_acertos", "_jogo_media"]:
+    for _k in ["_sim_media_val", "_sim_estrategia", "_sim_n_numeros", "_sim_min_acertos",
+               "_jogo_media", "_conf_jogos", "_conf_origem", "_conf_alvo_ok"]:
         st.session_state.pop(_k, None)
     st.header(f"Resultados: {estrategia} — {n_numeros} dezenas, {qtd_jogos} jogo(s)")
 
@@ -1297,6 +1299,16 @@ if btn_gerar:
         df_export = pd.DataFrame(jogos_gerados)
         csv = df_export.to_csv(index=False, header=False).encode("utf-8")
         st.download_button("⬇️ Baixar Jogos (CSV)", csv, "jogos_megasena.csv", "text/csv")
+
+    if jogos_gerados:
+        # Persistido porque a conferência roda fora deste ramo: clicar em
+        # "Conferir" dispara um rerun em que `btn_gerar` é False e
+        # `jogos_gerados` voltaria vazia.
+        st.session_state["_conf_jogos"] = [sorted(j) for j in jogos_gerados]
+        st.session_state["_conf_origem"] = (
+            f"{len(jogos_gerados)} jogo(s) de {n_numeros} dezenas · estratégia "
+            f"**{estrategia}**"
+        )
 
     if historico_sets:
         with st.expander("📊 Análise do Histórico"):
@@ -1374,6 +1386,15 @@ elif btn_painel:
     df_export = pd.DataFrame(painel_jogos)
     csv = df_export.to_csv(index=False, header=False).encode("utf-8")
     st.download_button("⬇️ Baixar Painel (CSV)", csv, "painel_megasena.csv", "text/csv")
+
+    # O painel também alimenta a conferência: são jogos como quaisquer outros.
+    for _k in ["_conf_alvo_ok"]:
+        st.session_state.pop(_k, None)
+    st.session_state["_conf_jogos"] = [sorted(j) for j in painel_jogos]
+    st.session_state["_conf_origem"] = (
+        f"Painel Completo · {len(painel_jogos)} jogo(s) de {n_numeros} dezenas, "
+        "um por estratégia"
+    )
 
 elif btn_simular:
     if len(resultado_alvo_sim) != 6:
@@ -1708,6 +1729,147 @@ if "_sim_media_val" in st.session_state and historico_sets:
         st.success(f"Jogo da posição **#{_cap:,}**: {' · '.join(f'{n:02d}' for n in _jm)}")
         st.markdown(render_volante_mega(_jm), unsafe_allow_html=True)
         st.caption(info_jogo(_jm, quentes_global))
+
+
+# ── CONFERÊNCIA DE RESULTADOS ─────────────────────────────────
+FAIXAS_PREMIO_MEGA = {6: "Sena", 5: "Quina", 4: "Quadra"}
+FAIXA_MINIMA_PREMIO_MEGA = 4
+
+
+def parse_alvo_mega(texto, n=6):
+    """`(dezenas, erro)`. Aceita qualquer separador não numérico — vírgula,
+    espaço, ponto-e-vírgula, hífen, barra — porque o resultado costuma vir
+    colado de sites com formatos diferentes."""
+    nums = [int(x) for x in re.split(r"\D+", texto.strip()) if x]
+    if not nums:
+        return [], "Digite as dezenas do resultado."
+    fora = sorted({d for d in nums if not 1 <= d <= 60})
+    if fora:
+        return [], f"Fora da faixa 1–60: {', '.join(f'{d:02d}' for d in fora)}."
+    repetidas = sorted({d for d in nums if nums.count(d) > 1})
+    if repetidas:
+        return [], f"Dezena repetida: {', '.join(f'{d:02d}' for d in repetidas)}."
+    if len(nums) != n:
+        return [], f"São necessárias {n} dezenas — você informou {len(nums)}."
+    return sorted(nums), ""
+
+
+def faixas_da_aposta_mega(jogo, alvo):
+    """`(faixas, acertos)` — quantas apostas simples de 6 dezenas dentro do jogo
+    fazem cada pontuação, e a sobreposição do jogo com o resultado.
+
+    Uma aposta de `n` dezenas equivale a C(n,6) apostas simples. Se `d` das
+    sorteadas caem no jogo, o número de apostas simples com exatamente `k`
+    acertos é C(d,k) × C(n-d,6-k) — é isso que a Caixa paga. O número de acertos
+    do jogo, sozinho, não diz quantas faixas ele premiou: um jogo de 7 dezenas que
+    acerta as 6 paga 1 sena E 6 quinas; um de 10 que acerta 5 paga 5 quinas E 50
+    quadras."""
+    js, al = set(jogo), set(alvo)
+    d = len(js & al)
+    n = len(js)
+    faixas = Counter()
+    for k in range(min(d, 6), -1, -1):
+        q = comb(d, k) * comb(n - d, 6 - k)
+        if q:
+            faixas[k] = q
+    return faixas, d
+
+
+st.divider()
+_conf_jogos = st.session_state.get("_conf_jogos") or []
+
+if _conf_jogos:
+    st.header("🔍 Conferir os jogos gerados")
+    if st.session_state.get("_conf_origem"):
+        st.caption(st.session_state["_conf_origem"])
+
+    st.download_button(
+        "⬇️ Baixar Jogos (CSV)",
+        pd.DataFrame(_conf_jogos).to_csv(index=False, header=False).encode("utf-8"),
+        "jogos_megasena.csv", "text/csv", key="_dl_conf",
+    )
+
+    _txt_alvo = st.text_input(
+        "Resultado do concurso (6 dezenas)",
+        key="_conf_alvo_txt",
+        placeholder="04,17,23,31,45,58",
+        help="Cole o resultado oficial. Qualquer separador serve.",
+    )
+    if st.button("🔍 Conferir", key="_btn_conferir"):
+        _alvo_novo, _erro_alvo = parse_alvo_mega(_txt_alvo)
+        if _erro_alvo:
+            st.error(_erro_alvo)
+            st.session_state.pop("_conf_alvo_ok", None)
+        else:
+            st.session_state["_conf_alvo_ok"] = _alvo_novo
+
+    _alvo = st.session_state.get("_conf_alvo_ok")
+    if _alvo:
+        st.write("**Resultado:** " + " · ".join(f"{n:02d}" for n in _alvo))
+
+        _tem_multipla = any(len(j) > 6 for j in _conf_jogos)
+        _linhas, _premiadas_tot = [], Counter()
+        for _i, _jogo in enumerate(_conf_jogos):
+            _faixas, _d = faixas_da_aposta_mega(_jogo, _alvo)
+            _pag = sorted((k for k in _faixas if k >= FAIXA_MINIMA_PREMIO_MEGA), reverse=True)
+            _premiadas_tot += Counter({k: _faixas[k] for k in _pag})
+            _linha = {
+                "Jogo": _i + 1,
+                "Dezenas": " · ".join(f"{n:02d}" for n in sorted(_jogo)),
+                "Acertos": _d,
+                "Prêmio": FAIXAS_PREMIO_MEGA.get(_pag[0], "—") if _pag else "—",
+            }
+            if _tem_multipla:
+                _linha["Apostas simples premiadas"] = (
+                    " + ".join(f"{_faixas[k]}× {FAIXAS_PREMIO_MEGA[k]}" for k in _pag)
+                    if _pag else "—"
+                )
+            _linhas.append(_linha)
+
+        st.dataframe(pd.DataFrame(_linhas), use_container_width=True, hide_index=True)
+
+        _acertos = [len(set(j) & set(_alvo)) for j in _conf_jogos]
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _c1.metric("Melhor jogo", max(_acertos))
+        _c2.metric("Média dos acertos", f"{sum(_acertos) / len(_acertos):.2f}")
+        _c3.metric("Apostas premiadas", sum(_premiadas_tot.values()))
+        _c4.metric("Jogos conferidos", len(_conf_jogos))
+
+        if _premiadas_tot:
+            st.success("🎉 " + " · ".join(
+                f"{_premiadas_tot[k]}× {FAIXAS_PREMIO_MEGA[k]}"
+                for k in sorted(_premiadas_tot, reverse=True)))
+        else:
+            st.info("Nenhuma aposta premiada — a Mega-Sena paga a partir da quadra "
+                    "(4 acertos).")
+
+        # Referência honesta: a média esperada é fixada pela hipergeométrica
+        # (n × 6 / 60) e não depende de estratégia nenhuma.
+        _refs = sorted({len(j) for j in _conf_jogos})
+        st.caption(
+            "Média esperada de qualquer jogo, por hipergeométrica — "
+            + " · ".join(f"{t} dezenas: {t * 6 / 60:.2f}" for t in _refs)
+            + ". É o piso de comparação: acima disso pode ser sorte, abaixo não é "
+            "azar. Um concurso isolado não mede estratégia — na Mega-Sena a quadra "
+            "sai em 1 de 2.332 apostas simples e a sena em 1 de 50.063.860."
+        )
+
+        with st.expander("Ver os volantes marcados contra o resultado"):
+            st.caption("Cada volante pinta apenas as dezenas do jogo que saíram; "
+                       "as que erraram vêm listadas abaixo dele.")
+            _cols_conf = st.columns(3)
+            for _i, _jogo in enumerate(_conf_jogos):
+                _bateram = sorted(set(_jogo) & set(_alvo))
+                _erraram = sorted(set(_jogo) - set(_alvo))
+                with _cols_conf[_i % 3]:
+                    st.markdown(f"**Jogo {_i + 1}** — {len(_bateram)} acertos")
+                    st.markdown(render_volante_mega(_bateram), unsafe_allow_html=True)
+                    st.caption("Erraram: " + " · ".join(f"{n:02d}" for n in _erraram)
+                               if _erraram else "Todas as dezenas do jogo saíram.")
+                    st.divider()
+    elif not _txt_alvo:
+        st.caption("Cole o resultado acima e clique em **Conferir** para ver os "
+                   "acertos de cada jogo.")
 
 # ── FOOTER ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
