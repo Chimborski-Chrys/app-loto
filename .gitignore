@@ -1,0 +1,23 @@
+# Ambiente virtual
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# CSVs de saída (exports e backtests)
+*_export.csv
+backtest_*.csv
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
